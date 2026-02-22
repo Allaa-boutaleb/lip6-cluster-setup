@@ -1,0 +1,1408 @@
+#!/bin/bash
+# =============================================================================
+# LIP6 Cluster Setup Script
+# Automates SSH, HPC (OAR), and Convergence (SLURM) configuration
+#
+# Author: Allaa Boutaleb (allaa.boutaleb@lip6.fr)
+#
+# Usage:
+#   ./lip6-cluster-setup            Run the setup wizard
+#   ./lip6-cluster-setup --reset    Reset/uninstall (local or full)
+# =============================================================================
+set -e
+
+BLUE='\033[1;34m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+RED='\033[1;31m'
+CYAN='\033[1;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ---- Reset mode ----
+
+if [ "$1" = "--reset" ] || [ "$1" = "--uninstall" ]; then
+    echo ""
+    echo -e "${YELLOW}================================================${NC}"
+    echo -e "${YELLOW}  LIP6 Cluster Setup — Reset / Uninstall${NC}"
+    echo -e "${YELLOW}================================================${NC}"
+    echo ""
+    echo -e "${BOLD}What do you want to reset?${NC}"
+    echo ""
+    echo -e "  ${GREEN}1${NC})  Local only"
+    echo -e "      ${DIM}Removes ~/hpc-notebook, ~/conv-manager, SSH config, local aliases${NC}"
+    echo ""
+    echo -e "  ${GREEN}2${NC})  Full reset (local + remote)"
+    echo -e "      ${DIM}Also restores .bashrc on HPC and Convergence from backup${NC}"
+    echo ""
+    echo -e "  ${RED}q${NC})  Cancel"
+    echo ""
+    read -p "> " reset_choice
+
+    case $reset_choice in
+        q|Q) echo -e "\n${DIM}Cancelled.${NC}\n"; exit 0 ;;
+        1|2) ;;
+        *) echo -e "${RED}Invalid choice.${NC}"; exit 1 ;;
+    esac
+
+    # Full reset: restore remote .bashrc FIRST (while SSH config still works)
+    if [ "$reset_choice" = "2" ]; then
+        echo ""
+        echo -e "${CYAN}Resetting remote .bashrc files...${NC}"
+        echo -e "${DIM}This requires SSH access (done before removing local SSH config).${NC}"
+        echo ""
+
+        # Try HPC
+        echo -n "  HPC:          "
+        if ssh -o ConnectTimeout=10 hpc "
+            if [ -f ~/.bashrc.pre-lip6-setup ]; then
+                cp ~/.bashrc.pre-lip6-setup ~/.bashrc
+                echo 'RESTORED'
+            else
+                echo 'NO_BACKUP'
+            fi
+        " 2>/dev/null | grep -q "RESTORED"; then
+            echo -e "\r  HPC:          ${GREEN}Restored .bashrc from backup${NC}"
+        elif ssh -o ConnectTimeout=10 hpc "echo ok" 2>/dev/null | grep -q "ok"; then
+            echo -e "\r  HPC:          ${YELLOW}No backup found (.bashrc.pre-lip6-setup)${NC}"
+        else
+            echo -e "\r  HPC:          ${DIM}Skipped (not configured or unreachable)${NC}"
+        fi
+
+        # Try Convergence
+        echo -n "  Convergence:  "
+        if ssh -o ConnectTimeout=10 conv "
+            if [ -f ~/.bashrc.pre-lip6-setup ]; then
+                cp ~/.bashrc.pre-lip6-setup ~/.bashrc
+                echo 'RESTORED'
+            else
+                echo 'NO_BACKUP'
+            fi
+        " 2>/dev/null | grep -q "RESTORED"; then
+            echo -e "\r  Convergence:  ${GREEN}Restored .bashrc from backup${NC}"
+        elif ssh -o ConnectTimeout=10 conv "echo ok" 2>/dev/null | grep -q "ok"; then
+            echo -e "\r  Convergence:  ${YELLOW}No backup found (.bashrc.pre-lip6-setup)${NC}"
+        else
+            echo -e "\r  Convergence:  ${DIM}Skipped (not configured or unreachable)${NC}"
+        fi
+    fi
+
+    echo ""
+    echo -e "${CYAN}Resetting local setup...${NC}"
+    echo ""
+
+    # Remove local scripts
+    for f in ~/hpc-notebook ~/conv-manager; do
+        if [ -f "$f" ]; then
+            rm "$f"
+            echo -e "  ${GREEN}Removed${NC} $f"
+        else
+            echo -e "  ${DIM}Already gone:${NC} $f"
+        fi
+    done
+
+    # Remove SSH config (restore backup if exists)
+    LATEST_BACKUP=$(ls -t ~/.ssh/config.backup.* 2>/dev/null | head -1)
+    if [ -n "$LATEST_BACKUP" ]; then
+        cp "$LATEST_BACKUP" ~/.ssh/config
+        echo -e "  ${GREEN}Restored${NC} SSH config from backup (${LATEST_BACKUP})"
+    elif [ -f ~/.ssh/config ]; then
+        rm ~/.ssh/config
+        echo -e "  ${GREEN}Removed${NC} SSH config"
+    else
+        echo -e "  ${DIM}No SSH config to remove.${NC}"
+    fi
+
+    # Remove aliases from shell configs
+    for rc in ~/.bashrc ~/.zshrc ~/.config/fish/config.fish; do
+        if [ -f "$rc" ] && grep -q 'alias hpc=\|alias conv=' "$rc" 2>/dev/null; then
+            grep -v 'alias hpc=' "$rc" | grep -v 'alias conv=' > "${rc}.tmp" 2>/dev/null || true
+            mv "${rc}.tmp" "$rc"
+            echo -e "  ${GREEN}Cleaned${NC} aliases from $rc"
+        fi
+    done
+
+    echo ""
+    echo -e "${GREEN}Reset complete.${NC} Run the script again to reconfigure."
+    echo ""
+    exit 0
+fi
+
+# ---- Helper: validated input ----
+
+# ask PROMPT DEFAULT REGEX ERROR_MSG
+# Loops until input matches REGEX. Prints result to stdout.
+# Prompts and errors go to stderr so they don't mix with the return value.
+ask() {
+    local prompt="$1"
+    local default="$2"
+    local regex="$3"
+    local error_msg="${4:-Invalid input. Try again.}"
+    local result=""
+
+    while true; do
+        if [ -n "$default" ]; then
+            echo -ne "${BOLD}${prompt}${NC} [${DIM}${default}${NC}]: " >&2
+            read result
+            result="${result:-$default}"
+        else
+            echo -ne "${BOLD}${prompt}${NC}: " >&2
+            read result
+        fi
+
+        if [ -z "$result" ]; then
+            echo -e "  ${RED}This field is required.${NC}" >&2
+            continue
+        fi
+
+        if [ -z "$regex" ] || echo "$result" | grep -qE "$regex"; then
+            echo "$result"
+            return 0
+        fi
+        echo -e "  ${RED}${error_msg}${NC}" >&2
+    done
+}
+
+# ask_choice PROMPT MAX_OPTIONS [DEFAULT]
+# Loops until user enters a number between 1 and MAX_OPTIONS.
+ask_choice() {
+    local prompt="$1"
+    local max="$2"
+    local default="${3:-}"
+    local result=""
+
+    while true; do
+        if [ -n "$default" ]; then
+            echo -ne "${DIM}${prompt} [${default}]:${NC} " >&2
+            read result
+            result="${result:-$default}"
+        else
+            echo -ne "${DIM}${prompt}:${NC} " >&2
+            read result
+        fi
+
+        if echo "$result" | grep -qE "^[1-${max}]$"; then
+            echo "$result"
+            return 0
+        fi
+        echo -e "  ${RED}Please enter a number between 1 and ${max}.${NC}" >&2
+    done
+}
+
+# ---- Welcome ----
+
+echo ""
+echo -e "${BLUE}================================================================${NC}"
+echo -e "${BOLD}            LIP6 Cluster Setup${NC}"
+echo -e "${DIM}   Automated configuration for HPC (OAR) & Convergence (SLURM)${NC}"
+echo -e "${DIM}   By Allaa Boutaleb (allaa.boutaleb@lip6.fr)${NC}"
+echo -e "${BLUE}================================================================${NC}"
+echo ""
+echo -e "${DIM}This script will:${NC}"
+echo -e "  1. Generate an SSH key (if needed)"
+echo -e "  2. Configure passwordless SSH access"
+echo -e "  3. Install cluster manager tools (hpc, conv)"
+echo -e "  4. Set up aliases on remote clusters"
+echo ""
+echo -e "${YELLOW}You will need:${NC}"
+echo -e "  - Your LIP6 username"
+echo -e "  - Your LIP6 secure password (wifi/workstation, NOT email)"
+echo -e "  - To know which clusters you have access to"
+echo ""
+read -p "Press Enter to continue..."
+
+# ---- Gather info ----
+
+echo ""
+echo -e "${BOLD}Step 1: Your information${NC}"
+echo ""
+
+USERNAME=$(ask \
+    "LIP6 username (lowercase letters, digits, underscores — e.g. boutalebm)" \
+    "" \
+    "^[a-z][a-z0-9_]+$" \
+    "Username must start with a letter and contain only lowercase letters, digits, or underscores.")
+
+EMAIL=$(ask \
+    "Email (e.g. firstname.lastname@lip6.fr)" \
+    "" \
+    "^[^@]+@[^@]+\.[^@]+$" \
+    "Must be a valid email address (e.g. firstname.lastname@lip6.fr).")
+
+echo ""
+echo -e "${BOLD}Which team are you on?${NC}"
+echo ""
+echo -e "  ${GREEN}1${NC})  ALMASTY, APR, BD, ComplexNetworks, DECISION, DELYS,"
+echo -e "      LFI, MOCAH, MoVe, NPA, PEQUAN, PolSys, RO, SMA"
+echo -e "      ${DIM}(Gateway: ssh.lip6.fr)${NC}"
+echo ""
+echo -e "  ${GREEN}2${NC})  ALSOC, CIAN, QI, SYEL"
+echo -e "      ${DIM}(Gateway: barder.lip6.fr)${NC}"
+echo ""
+team_choice=$(ask_choice "Select your team group (1 or 2)" 2 1)
+
+case $team_choice in
+    2) GATEWAY="barder.lip6.fr" ;;
+    *) GATEWAY="ssh.lip6.fr" ;;
+esac
+
+# Determine NFS storage path based on team
+echo ""
+echo -e "${BOLD}Which group does your team belong to?${NC}"
+echo -e "${DIM}This determines your NFS storage path on the HPC cluster.${NC}"
+echo ""
+echo -e "  ${GREEN}1${NC})  ACASA, BD, DECISION, DELYS, LFI, MLIA, MOCAH, MoVe, RO, SMA"
+echo -e "      ${DIM}(Storage: /net/big/\${USER})${NC}"
+echo ""
+echo -e "  ${GREEN}2${NC})  ALMASTY, APR, ComplexNetworks, NPA, PEQUAN, Phare, PolSys"
+echo -e "      ${DIM}(Storage: /home/cluster/\${USER})${NC}"
+echo ""
+echo -e "  ${GREEN}3${NC})  Not sure / other"
+echo ""
+storage_choice=$(ask_choice "Select your storage group (1, 2, or 3)" 3 1)
+
+case $storage_choice in
+    1) HPC_STORAGE="/net/big/${USERNAME}" ;;
+    2) HPC_STORAGE="/home/cluster/${USERNAME}" ;;
+    *) HPC_STORAGE="~/  (check with your team)" ;;
+esac
+
+echo ""
+echo -e "${BOLD}Which clusters do you need access to?${NC}"
+echo ""
+echo -e "  ${GREEN}1${NC})  HPC only (CPU cluster, OAR scheduler)"
+echo -e "  ${GREEN}2${NC})  Convergence only (GPU cluster, A100s, SLURM scheduler)"
+echo -e "  ${GREEN}3${NC})  Both (recommended)"
+echo ""
+cluster_choice=$(ask_choice "Select clusters to configure (1, 2, or 3)" 3 3)
+
+SETUP_HPC=false
+SETUP_CONV=false
+case $cluster_choice in
+    1) SETUP_HPC=true ;;
+    2) SETUP_CONV=true ;;
+    *) SETUP_HPC=true; SETUP_CONV=true ;;
+esac
+
+# ---- Confirm ----
+
+echo ""
+echo -e "${BLUE}────────────────────────────────────────────────${NC}"
+echo -e "${BOLD}  Please confirm:${NC}"
+echo ""
+echo -e "  Username:     ${CYAN}${USERNAME}${NC}"
+echo -e "  Email:        ${CYAN}${EMAIL}${NC}"
+echo -e "  Gateway:      ${CYAN}${GATEWAY}${NC}"
+echo -e "  Storage:      ${CYAN}${HPC_STORAGE}${NC}"
+echo -e "  HPC (OAR):    ${CYAN}$($SETUP_HPC && echo "Yes" || echo "No")${NC}"
+echo -e "  Convergence:  ${CYAN}$($SETUP_CONV && echo "Yes" || echo "No")${NC}"
+echo ""
+echo -e "${BLUE}────────────────────────────────────────────────${NC}"
+echo ""
+echo -e "${DIM}Press Enter to continue, or Ctrl+C to abort.${NC}"
+read
+
+# ---- SSH Key ----
+
+echo ""
+echo -e "${BOLD}Step 2: SSH key${NC}"
+echo ""
+
+SSH_KEY="$HOME/.ssh/id_ed25519"
+if [ -f "$SSH_KEY" ]; then
+    echo -e "${GREEN}SSH key already exists:${NC} $SSH_KEY"
+else
+    echo -e "Generating SSH key..."
+    mkdir -p ~/.ssh
+    ssh-keygen -t ed25519 -C "$EMAIL" -f "$SSH_KEY" -N ""
+    echo -e "${GREEN}SSH key generated:${NC} $SSH_KEY"
+fi
+
+chmod 700 ~/.ssh
+chmod 600 "$SSH_KEY"
+chmod 644 "${SSH_KEY}.pub"
+
+# ---- SSH Config ----
+
+echo ""
+echo -e "${BOLD}Step 3: SSH config${NC}"
+echo ""
+
+SSH_CONFIG="$HOME/.ssh/config"
+
+# Backup existing config
+if [ -f "$SSH_CONFIG" ]; then
+    cp "$SSH_CONFIG" "${SSH_CONFIG}.backup.$(date +%s)"
+    echo -e "${DIM}Backed up existing config to ${SSH_CONFIG}.backup.*${NC}"
+fi
+
+# Build config
+{
+    echo "# ==================================================================="
+    echo "# LIP6 Cluster SSH Config"
+    echo "# Generated by lip6-cluster-setup on $(date +%Y-%m-%d)"
+    echo "# ==================================================================="
+    echo ""
+    echo "Host lip6"
+    echo "    HostName $GATEWAY"
+    echo "    User $USERNAME"
+    echo "    IdentityFile $SSH_KEY"
+    echo ""
+
+    if $SETUP_HPC; then
+        echo "Host hpc"
+        echo "    HostName cluster.lip6.fr"
+        echo "    User $USERNAME"
+        echo "    ProxyJump lip6"
+        echo "    IdentityFile $SSH_KEY"
+        echo "    ServerAliveInterval 60"
+        echo "    ServerAliveCountMax 3"
+        echo ""
+    fi
+
+    if $SETUP_CONV; then
+        echo "Host conv"
+        echo "    HostName front.convergence.lip6.fr"
+        echo "    User $USERNAME"
+        echo "    ProxyJump lip6"
+        echo "    IdentityFile $SSH_KEY"
+        echo "    ServerAliveInterval 60"
+        echo "    ServerAliveCountMax 3"
+        echo ""
+        echo "Host *.convergence.lip6.fr"
+        echo "    User $USERNAME"
+        echo "    ProxyJump conv"
+        echo "    IdentityFile $SSH_KEY"
+        echo "    ServerAliveInterval 60"
+        echo "    ServerAliveCountMax 3"
+        echo ""
+    fi
+} > "$SSH_CONFIG"
+
+chmod 600 "$SSH_CONFIG"
+echo -e "${GREEN}SSH config written to ${SSH_CONFIG}${NC}"
+
+# ---- Copy SSH Keys ----
+
+echo ""
+echo -e "${BOLD}Step 4: Copying SSH key to servers${NC}"
+echo ""
+echo -e "${YELLOW}You will be asked for your LIP6 password a few times.${NC}"
+echo -e "${DIM}This is the LAST time you'll ever need to type it.${NC}"
+echo ""
+read -p "Press Enter to continue..."
+
+echo ""
+echo -e "${CYAN}Copying key to gateway (${GATEWAY})...${NC}"
+ssh-copy-id -i "${SSH_KEY}.pub" "${USERNAME}@${GATEWAY}" || {
+    echo -e "${RED}Failed to copy key to gateway. Check your password.${NC}"
+    exit 1
+}
+
+if $SETUP_HPC; then
+    echo ""
+    echo -e "${CYAN}Copying key to HPC cluster...${NC}"
+    ssh-copy-id -o "ProxyJump=${USERNAME}@${GATEWAY}" -i "${SSH_KEY}.pub" "${USERNAME}@cluster.lip6.fr" || {
+        echo -e "${RED}Failed to copy key to HPC. You may not have HPC access.${NC}"
+    }
+fi
+
+if $SETUP_CONV; then
+    echo ""
+    echo -e "${CYAN}Copying key to Convergence...${NC}"
+    ssh-copy-id -o "ProxyJump=${USERNAME}@${GATEWAY}" -i "${SSH_KEY}.pub" "${USERNAME}@front.convergence.lip6.fr" || {
+        echo -e "${RED}Failed to copy key to Convergence. You may not have access.${NC}"
+    }
+
+    echo ""
+    echo -e "${CYAN}Setting up node-to-node SSH on Convergence...${NC}"
+    ssh conv "
+        if [ ! -f ~/.ssh/id_ed25519 ]; then
+            ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519 -q
+        fi
+        grep -qF \"\$(cat ~/.ssh/id_ed25519.pub)\" ~/.ssh/authorized_keys 2>/dev/null || cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+        chmod 600 ~/.ssh/authorized_keys
+    " 2>/dev/null && echo -e "${GREEN}Node-to-node SSH configured.${NC}" || echo -e "${YELLOW}Could not auto-configure node SSH. You can do this manually later.${NC}"
+fi
+
+# ---- Test connections ----
+
+echo ""
+echo -e "${BOLD}Step 5: Testing connections${NC}"
+echo ""
+
+if $SETUP_HPC; then
+    echo -n "  HPC:          "
+    if ssh -o ConnectTimeout=10 hpc "echo ok" 2>/dev/null; then
+        echo -e "\r  HPC:          ${GREEN}Connected${NC}"
+    else
+        echo -e "\r  HPC:          ${RED}Failed${NC}"
+    fi
+fi
+
+if $SETUP_CONV; then
+    echo -n "  Convergence:  "
+    if ssh -o ConnectTimeout=10 conv "echo ok" 2>/dev/null; then
+        echo -e "\r  Convergence:  ${GREEN}Connected${NC}"
+    else
+        echo -e "\r  Convergence:  ${RED}Failed${NC}"
+    fi
+fi
+
+# ---- Install manager scripts ----
+
+echo ""
+echo -e "${BOLD}Step 6: Installing cluster manager tools${NC}"
+echo ""
+
+INSTALL_DIR="$HOME"
+
+if $SETUP_HPC; then
+    # Generate HPC manager
+    cat > "${INSTALL_DIR}/hpc-notebook" << 'HPC_SCRIPT'
+#!/bin/bash
+# HPC Manager for LIP6 Cluster
+# __USERNAME__ - __EMAIL__
+set -e
+
+BLUE='\033[1;34m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+RED='\033[1;31m'
+CYAN='\033[1;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+HPC_USER="__USERNAME__"
+
+welcome() {
+    echo ""
+    echo -e "${BLUE}================================================${NC}"
+    echo -e "${BOLD}         LIP6 HPC Cluster Manager${NC}"
+    echo -e "${DIM}    __USERNAME__ - __EMAIL__${NC}"
+    echo -e "${BLUE}================================================${NC}"
+}
+
+show_menu() {
+    echo ""
+    echo -e "${BOLD}What do you want to do?${NC}"
+    echo ""
+    echo -e "  ${GREEN}1${NC})  Launch a new session"
+    echo -e "  ${GREEN}2${NC})  Reconnect to a running session"
+    echo -e "  ${GREEN}3${NC})  View my jobs"
+    echo -e "  ${GREEN}4${NC})  Cancel jobs"
+    echo -e "  ${GREEN}5${NC})  SSH into login node"
+    echo -e "  ${RED}q${NC})  Quit"
+    echo ""
+}
+
+launch_session() {
+    echo ""
+    echo -e "${BOLD}How many cores?${NC}"
+    echo -e "  ${DIM}Press Enter for 24${NC}"
+    read -p "> " cores
+    cores="${cores:-24}"
+
+    echo ""
+    echo -e "${BOLD}How long do you need?${NC}"
+    echo -e "  ${DIM}Press Enter for 24 hours (format: H:M:S)${NC}"
+    read -p "> " wall
+    wall="${wall:-24:0:0}"
+
+    echo ""
+    echo -e "${BOLD}How do you want to work?${NC}"
+    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
+    echo -e "  ${GREEN}2${NC})  Terminal only (SSH into compute node)"
+    echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
+    echo ""
+    read -p "> " mode
+    mode="${mode:-1}"
+
+    local port=8888
+
+    if [ "$mode" = "2" ]; then
+        echo ""
+        echo -e "${YELLOW}Terminal mode requires an interactive OAR session.${NC}"
+        echo -e "Opening SSH to the cluster..."
+        echo ""
+        echo -e "${DIM}Run this on the cluster:${NC}"
+        echo -e "  ${GREEN}oarsub -l /nodes=1/core=${cores},walltime=${wall} -p \"host like 'big%'\" -I${NC}"
+        echo ""
+        ssh hpc
+        return
+    fi
+
+    echo ""
+    echo -e "${CYAN}Submitting Jupyter Lab (${cores} cores, ${wall})...${NC}"
+
+    JOBID=$(ssh hpc bash -s "$cores" "$wall" "$port" << 'REMOTE'
+CORES="$1"
+WALL="$2"
+PORT="$3"
+cat > ~/._jupyter_job.sh << JOBSCRIPT
+#!/bin/bash
+#OAR -l {host like 'big1%'}/nodes=1/core=${CORES},walltime=${WALL}
+#OAR --notify mail:__EMAIL__
+
+source /etc/profile.d/modules.sh
+module purge
+module load python/anaconda3
+eval "\$(conda shell.bash hook)"
+
+jupyter lab --ip=0.0.0.0 --no-browser --port=${PORT}
+JOBSCRIPT
+chmod +x ~/._jupyter_job.sh
+oarsub -S ~/._jupyter_job.sh 2>&1 | grep -oP 'OAR_JOB_ID=\K[0-9]+'
+REMOTE
+    )
+
+    if [ -z "$JOBID" ]; then
+        echo -e "${RED}Failed to submit job.${NC}"
+        return
+    fi
+
+    echo -e "${GREEN}Job $JOBID submitted.${NC} Waiting for it to start..."
+    sleep 5
+
+    local attempts=0
+    while true; do
+        STATE=$(ssh hpc "oarstat -f -j $JOBID 2>/dev/null | grep 'state =' | head -1 | awk -F= '{print \$2}' | tr -d ' '")
+        if [ "$STATE" = "Running" ]; then
+            break
+        elif [ "$STATE" = "Error" ] || [ "$STATE" = "Terminated" ]; then
+            echo -e "${RED}Job failed (state: $STATE)${NC}"
+            echo -e "Check logs: ${DIM}ssh hpc 'cat ~/OAR.${JOBID}.stderr'${NC}"
+            return
+        fi
+        attempts=$((attempts + 1))
+        if [ $attempts -gt 60 ]; then
+            echo -e "${YELLOW}Still queued after 5 min. Job $JOBID is waiting for resources.${NC}"
+            echo -e "Use option 2 to connect later, or option 4 to cancel."
+            return
+        fi
+        echo -e "  ${DIM}${STATE:-Queued}... ($((attempts * 5))s)${NC}"
+        sleep 5
+    done
+
+    connect_to_job "$JOBID" "$port" "$mode"
+}
+
+connect_to_job() {
+    local jobid="$1"
+    local port="${2:-8888}"
+    local mode="${3:-1}"
+
+    local node=$(ssh hpc "oarstat -f -j $jobid 2>/dev/null | grep 'assigned_hostnames' | awk '{print \$3}'")
+    if [ -z "$node" ]; then
+        echo -e "${RED}Could not find node for job $jobid${NC}"
+        return
+    fi
+
+    echo -e "${CYAN}Running on ${BOLD}$node${NC}${CYAN}. Waiting for Jupyter...${NC}"
+
+    local url=""
+    for i in $(seq 1 30); do
+        url=$(ssh hpc "grep -o 'http://[^ ]*' ~/OAR.${jobid}.stderr 2>/dev/null | tail -1")
+        if [ -n "$url" ]; then
+            break
+        fi
+        sleep 2
+    done
+
+    if [ -z "$url" ]; then
+        echo -e "${RED}Jupyter didn't start.${NC}"
+        echo -e "Check logs: ${DIM}ssh hpc 'cat ~/OAR.${jobid}.stderr'${NC}"
+        return
+    fi
+
+    local local_url=$(echo "$url" | sed "s|http://[^:]*:|http://localhost:|")
+
+    echo ""
+    echo -e "${GREEN}================================================${NC}"
+    echo -e "${GREEN}  Session ready!${NC}"
+    echo -e "${GREEN}================================================${NC}"
+    echo ""
+    echo -e "  ${BOLD}Job:${NC}   $jobid"
+    echo -e "  ${BOLD}Node:${NC}  $node"
+    echo -e "  ${BOLD}URL:${NC}   ${CYAN}$local_url${NC}"
+    echo ""
+
+    if [ "$mode" = "3" ]; then
+        echo -e "${CYAN}Opening Jupyter in browser...${NC}"
+        if command -v xdg-open &>/dev/null; then
+            xdg-open "$local_url" 2>/dev/null &
+        elif command -v open &>/dev/null; then
+            open "$local_url" &
+        fi
+        echo ""
+        echo -e "${BOLD}To open a terminal on $node, run in another tab:${NC}"
+        echo ""
+        echo -e "  ${GREEN}ssh -t hpc \"OAR_JOB_ID=$jobid oarsh $node\"${NC}"
+        echo ""
+        echo -e "${DIM}Tunnel active. Ctrl+C to disconnect (job keeps running).${NC}"
+        echo ""
+        ssh -N -L ${port}:${node}:${port} hpc
+    elif [ "$mode" = "1" ]; then
+        echo -e "${CYAN}Opening Jupyter in browser...${NC}"
+        if command -v xdg-open &>/dev/null; then
+            xdg-open "$local_url" 2>/dev/null &
+        elif command -v open &>/dev/null; then
+            open "$local_url" &
+        fi
+        echo -e "${DIM}Tunnel active. Ctrl+C to disconnect (job keeps running).${NC}"
+        echo ""
+        ssh -N -L ${port}:${node}:${port} hpc
+    fi
+}
+
+my_jobs() {
+    echo ""
+    local output=$(ssh hpc "oarstat -u ${HPC_USER} 2>/dev/null")
+    if echo "$output" | grep -q "^[0-9]"; then
+        echo -e "${BOLD}Your jobs:${NC}"
+        echo ""
+        echo "$output"
+    else
+        echo -e "${DIM}No running jobs.${NC}"
+    fi
+    echo ""
+}
+
+cancel_job() {
+    echo ""
+    local output=$(ssh hpc "oarstat -u ${HPC_USER} 2>/dev/null")
+    if ! echo "$output" | grep -q "^[0-9]"; then
+        echo -e "${DIM}No running jobs to cancel.${NC}"
+        return
+    fi
+    echo -e "${BOLD}Your jobs:${NC}"
+    echo ""
+    echo "$output"
+    echo ""
+    echo -e "Enter a job ID, or ${BOLD}all${NC} to cancel everything."
+    read -p "> " jobid
+    if [ "$jobid" = "all" ]; then
+        ssh hpc "for jid in \$(oarstat -u ${HPC_USER} 2>/dev/null | awk '/^[0-9]/{print \$1}'); do oardel \$jid; echo \"Cancelled \$jid\"; done"
+        echo -e "${GREEN}Done.${NC}"
+    elif [ -n "$jobid" ]; then
+        ssh hpc "oardel $jobid"
+        echo -e "${GREEN}Job $jobid cancelled.${NC}"
+    fi
+}
+
+connect_existing() {
+    echo ""
+    local output=$(ssh hpc "oarstat -u ${HPC_USER} 2>/dev/null")
+    if ! echo "$output" | grep -q "^[0-9]"; then
+        echo -e "${DIM}No running jobs to connect to.${NC}"
+        return
+    fi
+
+    local job_ids=($(echo "$output" | awk '/^[0-9]/{print $1}'))
+    local jobid=""
+
+    if [ ${#job_ids[@]} -eq 1 ]; then
+        jobid="${job_ids[0]}"
+        echo -e "Auto-selecting your only running job: ${BOLD}$jobid${NC}"
+    else
+        echo -e "${BOLD}Your jobs:${NC}"
+        echo ""
+        echo "$output"
+        echo ""
+        echo -e "Which job do you want to connect to?"
+        read -p "> " jobid
+    fi
+
+    if [ -n "$jobid" ]; then
+        echo ""
+        echo -e "${BOLD}How do you want to connect?${NC}"
+        echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
+        echo -e "  ${GREEN}2${NC})  Terminal only"
+        echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
+        echo ""
+        read -p "> " mode
+        mode="${mode:-1}"
+        if [ "$mode" = "2" ]; then
+            local node=$(ssh hpc "oarstat -f -j $jobid 2>/dev/null | grep 'assigned_hostnames' | awk '{print \$3}'")
+            if [ -z "$node" ]; then
+                echo -e "${RED}Could not find node for job $jobid${NC}"
+                return
+            fi
+            echo -e "${CYAN}Connecting to $node...${NC}"
+            ssh hpc "OAR_JOB_ID=$jobid oarsh $node"
+        else
+            connect_to_job "$jobid" 8888 "$mode"
+        fi
+    fi
+}
+
+welcome
+while true; do
+    show_menu
+    read -p "> " choice
+    case $choice in
+        1) launch_session ;;
+        2) connect_existing ;;
+        3) my_jobs ;;
+        4) cancel_job ;;
+        5) ssh hpc ;;
+        q|Q) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
+        *) echo -e "${RED}Invalid choice.${NC}" ;;
+    esac
+done
+HPC_SCRIPT
+
+    # Replace placeholders
+    sed -i "s/__USERNAME__/${USERNAME}/g" "${INSTALL_DIR}/hpc-notebook"
+    sed -i "s/__EMAIL__/${EMAIL}/g" "${INSTALL_DIR}/hpc-notebook"
+    chmod +x "${INSTALL_DIR}/hpc-notebook"
+    echo -e "${GREEN}Installed:${NC} ~/hpc-notebook (alias: hpc)"
+fi
+
+if $SETUP_CONV; then
+    # Generate Convergence manager
+    cat > "${INSTALL_DIR}/conv-manager" << 'CONV_SCRIPT'
+#!/bin/bash
+# Convergence GPU Cluster Manager for LIP6
+# __USERNAME__ - __EMAIL__
+set -e
+
+BLUE='\033[1;34m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+RED='\033[1;31m'
+CYAN='\033[1;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+CONV_USER="__USERNAME__"
+CONV_PORT=9888
+
+welcome() {
+    echo ""
+    echo -e "${BLUE}================================================${NC}"
+    echo -e "${BOLD}     LIP6 Convergence GPU Cluster Manager${NC}"
+    echo -e "${DIM}    __USERNAME__ - __EMAIL__${NC}"
+    echo -e "${BLUE}================================================${NC}"
+    echo ""
+    echo -e "${DIM}  10 nodes | 40 x A100 80GB GPUs | SLURM${NC}"
+}
+
+show_menu() {
+    echo ""
+    echo -e "${BOLD}What do you want to do?${NC}"
+    echo ""
+    echo -e "  ${GREEN}1${NC})  Launch a new GPU session"
+    echo -e "  ${GREEN}2${NC})  Reconnect to a running session"
+    echo -e "  ${GREEN}3${NC})  View my jobs"
+    echo -e "  ${GREEN}4${NC})  Cancel jobs"
+    echo -e "  ${GREEN}5${NC})  Cluster status (GPUs, nodes)"
+    echo -e "  ${GREEN}6${NC})  SSH into login node"
+    echo -e "  ${RED}q${NC})  Quit"
+    echo ""
+}
+
+pick_gpu() {
+    echo ""
+    echo -e "${BOLD}Which GPU type?${NC}"
+    echo ""
+    echo -e "  ${GREEN}1${NC})  A100 80GB full     ${DIM}(node01-06, best for large models)${NC}"
+    echo -e "  ${GREEN}2${NC})  A100 40GB MIG       ${DIM}(node07-10, good for smaller jobs)${NC}"
+    echo ""
+    read -p "> " gpu_choice
+    case $gpu_choice in
+        1) GPU_TYPE="a100_7g.80gb" ;;
+        2) GPU_TYPE="a100_3g.40gb" ;;
+        *) GPU_TYPE="a100_7g.80gb" ;;
+    esac
+}
+
+launch_session() {
+    pick_gpu
+
+    echo ""
+    echo -e "${BOLD}How many GPUs?${NC}"
+    echo -e "  ${DIM}Press Enter for 1 (max 4 per node for full, 8 for MIG)${NC}"
+    read -p "> " num_gpus
+    num_gpus="${num_gpus:-1}"
+
+    echo ""
+    echo -e "${BOLD}How long do you need?${NC}"
+    echo -e "  ${DIM}Press Enter for 8 hours (format: HH:MM:SS, max 15 days)${NC}"
+    read -p "> " wall
+    wall="${wall:-08:00:00}"
+
+    echo ""
+    echo -e "${BOLD}Job name?${NC}"
+    echo -e "  ${DIM}Press Enter for 'gpu-session'${NC}"
+    read -p "> " job_name
+    job_name="${job_name:-gpu-session}"
+
+    echo ""
+    echo -e "${BOLD}How do you want to work?${NC}"
+    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
+    echo -e "  ${GREEN}2${NC})  Terminal only (SSH into compute node)"
+    echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
+    echo -e "  ${GREEN}4${NC})  Submit a custom script"
+    echo ""
+    read -p "> " mode
+    mode="${mode:-1}"
+
+    if [ "$mode" = "4" ]; then
+        submit_custom "$num_gpus" "$wall" "$job_name"
+        return
+    fi
+
+    if [ "$mode" = "2" ]; then
+        echo ""
+        echo -e "${CYAN}Requesting interactive session: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
+        echo -e "${DIM}This is interactive — dies when you disconnect.${NC}"
+        echo -e "${DIM}Use option 1 or 3 for persistent Jupyter sessions.${NC}"
+        echo ""
+        ssh -t conv "salloc --job-name=${job_name} --nodes=1 --gpus-per-node=${GPU_TYPE}:${num_gpus} --time=${wall}"
+        return
+    fi
+
+    echo ""
+    echo -e "${CYAN}Submitting Jupyter Lab: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
+
+    JOBID=$(ssh conv bash -s "$num_gpus" "$GPU_TYPE" "$wall" "$CONV_PORT" "$job_name" << 'REMOTE'
+NUM_GPUS="$1"
+GPU_TYPE="$2"
+WALL="$3"
+PORT="$4"
+JOB_NAME="$5"
+cat > ~/._conv_jupyter.sh << JOBSCRIPT
+#!/bin/bash
+#SBATCH --job-name=${JOB_NAME}
+#SBATCH --nodes=1
+#SBATCH --gpus-per-node=${GPU_TYPE}:${NUM_GPUS}
+#SBATCH --time=${WALL}
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=__EMAIL__
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
+
+source /etc/profile.d/modules.sh
+module purge
+module load python/anaconda3
+eval "\$(conda shell.bash hook)"
+
+jupyter lab --ip=0.0.0.0 --no-browser --port=${PORT}
+JOBSCRIPT
+sbatch ~/._conv_jupyter.sh 2>&1 | grep -oP 'Submitted batch job \K[0-9]+'
+REMOTE
+    )
+
+    if [ -z "$JOBID" ]; then
+        echo -e "${RED}Failed to submit job.${NC}"
+        return
+    fi
+
+    echo -e "${GREEN}Job $JOBID submitted.${NC} Waiting for it to start..."
+    echo -e "${DIM}(Convergence queue can take minutes to hours depending on load)${NC}"
+    sleep 5
+
+    local attempts=0
+    while true; do
+        STATE=$(ssh conv "squeue -j $JOBID -h -o '%T' 2>/dev/null" 2>/dev/null)
+        if [ "$STATE" = "RUNNING" ]; then
+            break
+        elif [ "$STATE" = "FAILED" ] || [ "$STATE" = "CANCELLED" ] || [ "$STATE" = "TIMEOUT" ]; then
+            echo -e "${RED}Job failed (state: $STATE)${NC}"
+            echo -e "Check logs: ${DIM}ssh conv 'cat ~/${job_name}-${JOBID}.err'${NC}"
+            return
+        elif [ -z "$STATE" ]; then
+            local sacct_state=$(ssh conv "sacct -j $JOBID --format=State -X --noheader 2>/dev/null | tr -d ' '" 2>/dev/null)
+            if [ -n "$sacct_state" ] && [ "$sacct_state" != "PENDING" ] && [ "$sacct_state" != "RUNNING" ]; then
+                echo -e "${RED}Job ended (state: ${sacct_state:-unknown})${NC}"
+                echo -e "Check logs: ${DIM}ssh conv 'cat ~/${job_name}-${JOBID}.err'${NC}"
+                return
+            fi
+        fi
+        attempts=$((attempts + 1))
+        if [ $attempts -gt 120 ]; then
+            echo -e "${YELLOW}Still queued after 10 min. Job $JOBID is waiting for GPUs.${NC}"
+            echo -e "Use option 2 to connect later, or option 4 to cancel."
+            return
+        fi
+        echo -e "  ${DIM}${STATE:-PENDING}... ($((attempts * 5))s)${NC}"
+        sleep 5
+    done
+
+    connect_to_job "$JOBID" "$mode" "$job_name"
+}
+
+submit_custom() {
+    local num_gpus="$1"
+    local wall="$2"
+    local job_name="$3"
+
+    echo ""
+    echo -e "${BOLD}Path to your script on the cluster?${NC}"
+    echo -e "  ${DIM}e.g. ~/train.sh${NC}"
+    read -p "> " script_path
+
+    if [ -z "$script_path" ]; then
+        echo -e "${RED}No script provided.${NC}"
+        return
+    fi
+
+    echo ""
+    echo -e "${CYAN}Submitting ${script_path}: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
+
+    JOBID=$(ssh conv "sbatch --job-name=${job_name} --nodes=1 --gpus-per-node=${GPU_TYPE}:${num_gpus} --time=${wall} --mail-type=ALL --mail-user=__EMAIL__ --output=%x-%j.out --error=%x-%j.err ${script_path} 2>&1 | grep -oP 'Submitted batch job \K[0-9]+'")
+
+    if [ -z "$JOBID" ]; then
+        echo -e "${RED}Failed to submit job.${NC}"
+        return
+    fi
+
+    echo -e "${GREEN}Job $JOBID submitted!${NC}"
+    echo -e "  Check status:  ${DIM}option 3${NC}"
+    echo -e "  Check logs:    ${DIM}ssh conv 'cat ~/${job_name}-${JOBID}.out'${NC}"
+    echo -e "  Cancel:        ${DIM}option 4${NC}"
+}
+
+connect_to_job() {
+    local jobid="$1"
+    local mode="${2:-1}"
+    local job_name="${3:-gpu-session}"
+
+    local node=$(ssh conv "squeue -j $jobid -h -o '%N' 2>/dev/null" 2>/dev/null)
+    if [ -z "$node" ]; then
+        echo -e "${RED}Could not find node for job $jobid${NC}"
+        return
+    fi
+
+    echo -e "${CYAN}Running on ${BOLD}$node${NC}${CYAN}. Waiting for Jupyter...${NC}"
+
+    local url=""
+    for i in $(seq 1 30); do
+        url=$(ssh conv "grep -o 'http://[^ ]*' ~/*-${jobid}.err 2>/dev/null | tail -1" 2>/dev/null)
+        if [ -n "$url" ]; then
+            break
+        fi
+        sleep 2
+    done
+
+    if [ -z "$url" ]; then
+        echo -e "${RED}Jupyter didn't start.${NC}"
+        echo -e "Check logs: ${DIM}ssh conv 'cat ~/*-${jobid}.err'${NC}"
+        return
+    fi
+
+    local remote_port=$(echo "$url" | grep -oP ':\K[0-9]+(?=/)' | head -1)
+    remote_port="${remote_port:-$CONV_PORT}"
+    local local_port="$remote_port"
+    local local_url=$(echo "$url" | sed "s|http://[^:]*:${remote_port}|http://localhost:${local_port}|")
+
+    echo ""
+    echo -e "${GREEN}================================================${NC}"
+    echo -e "${GREEN}  GPU Session ready!${NC}"
+    echo -e "${GREEN}================================================${NC}"
+    echo ""
+    echo -e "  ${BOLD}Job:${NC}    $jobid"
+    echo -e "  ${BOLD}Node:${NC}   $node"
+    echo -e "  ${BOLD}Port:${NC}   $remote_port"
+    echo -e "  ${BOLD}URL:${NC}    ${CYAN}$local_url${NC}"
+    echo ""
+
+    if [ "$mode" = "3" ]; then
+        echo -e "${CYAN}Opening Jupyter in browser...${NC}"
+        if command -v xdg-open &>/dev/null; then
+            xdg-open "$local_url" 2>/dev/null &
+        elif command -v open &>/dev/null; then
+            open "$local_url" &
+        fi
+        echo ""
+        echo -e "${BOLD}To open a terminal on $node, run in another tab:${NC}"
+        echo ""
+        echo -e "  ${GREEN}ssh -t -J conv ${node}.convergence.lip6.fr${NC}"
+        echo ""
+        echo -e "${DIM}Tunnel active (port ${remote_port}). Ctrl+C to disconnect (job keeps running).${NC}"
+        echo ""
+        ssh -N -J conv -L ${local_port}:localhost:${remote_port} ${node}.convergence.lip6.fr
+    elif [ "$mode" = "1" ]; then
+        echo -e "${CYAN}Opening Jupyter in browser...${NC}"
+        if command -v xdg-open &>/dev/null; then
+            xdg-open "$local_url" 2>/dev/null &
+        elif command -v open &>/dev/null; then
+            open "$local_url" &
+        fi
+        echo -e "${DIM}Tunnel active (port ${remote_port}). Ctrl+C to disconnect (job keeps running).${NC}"
+        echo ""
+        ssh -N -J conv -L ${local_port}:localhost:${remote_port} ${node}.convergence.lip6.fr
+    fi
+}
+
+my_jobs() {
+    echo ""
+    local output=$(ssh conv "squeue -u ${CONV_USER} 2>/dev/null" 2>/dev/null)
+    if echo "$output" | grep -q "${CONV_USER}"; then
+        echo -e "${BOLD}Your jobs:${NC}"
+        echo ""
+        echo "$output"
+        echo ""
+        echo -e "${DIM}Detailed info on a job:${NC}"
+        read -p "Job ID (or Enter to skip): " jobid
+        if [ -n "$jobid" ]; then
+            echo ""
+            ssh conv "sacct -j $jobid --format='JobID,JobName,NodeList,AllocTres%80,Start,End,State' -X 2>/dev/null" 2>/dev/null
+        fi
+    else
+        echo -e "${DIM}No running jobs.${NC}"
+    fi
+    echo ""
+}
+
+cancel_job() {
+    echo ""
+    local output=$(ssh conv "squeue -u ${CONV_USER} 2>/dev/null" 2>/dev/null)
+    if ! echo "$output" | grep -q "${CONV_USER}"; then
+        echo -e "${DIM}No running jobs to cancel.${NC}"
+        return
+    fi
+    echo -e "${BOLD}Your jobs:${NC}"
+    echo ""
+    echo "$output"
+    echo ""
+    echo -e "Enter a job ID, or ${BOLD}all${NC} to cancel everything."
+    read -p "> " jobid
+    if [ "$jobid" = "all" ]; then
+        ssh conv "scancel -u ${CONV_USER} 2>/dev/null" 2>/dev/null
+        echo -e "${GREEN}All jobs cancelled.${NC}"
+    elif [ -n "$jobid" ]; then
+        ssh conv "scancel $jobid 2>/dev/null" 2>/dev/null
+        echo -e "${GREEN}Job $jobid cancelled.${NC}"
+    fi
+}
+
+cluster_status() {
+    echo ""
+    echo -e "${BOLD}Cluster status:${NC}"
+    echo ""
+    ssh conv "sinfo -p convergence --Node -O 'nodelist:10,cpusstate:16,memory:10,allocmem:10,gres:35,gresused:35,statelong:12' 2>/dev/null" 2>/dev/null
+    echo ""
+}
+
+connect_existing() {
+    echo ""
+    local output=$(ssh conv "squeue -u ${CONV_USER} 2>/dev/null" 2>/dev/null)
+    if ! echo "$output" | grep -q "${CONV_USER}"; then
+        echo -e "${DIM}No running jobs to connect to.${NC}"
+        return
+    fi
+
+    local job_ids=($(echo "$output" | awk "/${CONV_USER}/{print \$1}"))
+    local jobid=""
+    local job_name=""
+
+    if [ ${#job_ids[@]} -eq 1 ]; then
+        jobid="${job_ids[0]}"
+        job_name=$(echo "$output" | awk "/${CONV_USER}/{print \$3}")
+        echo -e "Auto-selecting your only running job: ${BOLD}$jobid${NC}"
+    else
+        echo -e "${BOLD}Your jobs:${NC}"
+        echo ""
+        echo "$output"
+        echo ""
+        echo -e "Which job do you want to connect to?"
+        read -p "> " jobid
+        job_name=$(ssh conv "squeue -j $jobid -h -o '%j' 2>/dev/null" 2>/dev/null)
+    fi
+
+    if [ -n "$jobid" ]; then
+        echo ""
+        echo -e "${BOLD}How do you want to connect?${NC}"
+        echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
+        echo -e "  ${GREEN}2${NC})  Terminal only"
+        echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
+        echo ""
+        read -p "> " mode
+        mode="${mode:-1}"
+        if [ "$mode" = "2" ]; then
+            local node=$(ssh conv "squeue -j $jobid -h -o '%N' 2>/dev/null" 2>/dev/null)
+            if [ -z "$node" ]; then
+                echo -e "${RED}Could not find node for job $jobid${NC}"
+                return
+            fi
+            echo -e "${CYAN}Connecting to $node...${NC}"
+            ssh -t -J conv ${node}.convergence.lip6.fr
+        else
+            connect_to_job "$jobid" "$mode" "${job_name:-gpu-session}"
+        fi
+    fi
+}
+
+welcome
+while true; do
+    show_menu
+    read -p "> " choice
+    case $choice in
+        1) launch_session ;;
+        2) connect_existing ;;
+        3) my_jobs ;;
+        4) cancel_job ;;
+        5) cluster_status ;;
+        6) ssh conv ;;
+        q|Q) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
+        *) echo -e "${RED}Invalid choice.${NC}" ;;
+    esac
+done
+CONV_SCRIPT
+
+    # Replace placeholders
+    sed -i "s/__USERNAME__/${USERNAME}/g" "${INSTALL_DIR}/conv-manager"
+    sed -i "s/__EMAIL__/${EMAIL}/g" "${INSTALL_DIR}/conv-manager"
+    chmod +x "${INSTALL_DIR}/conv-manager"
+    echo -e "${GREEN}Installed:${NC} ~/conv-manager (alias: conv)"
+fi
+
+# ---- Shell aliases ----
+
+echo ""
+echo -e "${BOLD}Step 7: Setting up shell aliases${NC}"
+echo ""
+
+setup_alias() {
+    local file="$1"
+    local name="$2"
+    local cmd="$3"
+
+    if [ -f "$file" ]; then
+        # Remove old alias if exists
+        grep -v "alias ${name}=" "$file" > "${file}.tmp" 2>/dev/null || true
+        mv "${file}.tmp" "$file"
+    fi
+    echo "alias ${name}=\"${cmd}\"" >> "$file"
+}
+
+# Detect shell
+SHELL_NAME=$(basename "$SHELL" 2>/dev/null || echo "bash")
+
+if [ "$SHELL_NAME" = "fish" ]; then
+    SHELL_CONFIG="$HOME/.config/fish/config.fish"
+    mkdir -p "$(dirname "$SHELL_CONFIG")"
+    if $SETUP_HPC; then
+        grep -v 'alias hpc=' "$SHELL_CONFIG" > "${SHELL_CONFIG}.tmp" 2>/dev/null || true
+        mv "${SHELL_CONFIG}.tmp" "$SHELL_CONFIG" 2>/dev/null || true
+        echo 'alias hpc="~/hpc-notebook"' >> "$SHELL_CONFIG"
+    fi
+    if $SETUP_CONV; then
+        grep -v 'alias conv=' "$SHELL_CONFIG" > "${SHELL_CONFIG}.tmp" 2>/dev/null || true
+        mv "${SHELL_CONFIG}.tmp" "$SHELL_CONFIG" 2>/dev/null || true
+        echo 'alias conv="~/conv-manager"' >> "$SHELL_CONFIG"
+    fi
+elif [ "$SHELL_NAME" = "zsh" ]; then
+    SHELL_CONFIG="$HOME/.zshrc"
+    $SETUP_HPC && setup_alias "$SHELL_CONFIG" "hpc" "~/hpc-notebook"
+    $SETUP_CONV && setup_alias "$SHELL_CONFIG" "conv" "~/conv-manager"
+else
+    SHELL_CONFIG="$HOME/.bashrc"
+    $SETUP_HPC && setup_alias "$SHELL_CONFIG" "hpc" "~/hpc-notebook"
+    $SETUP_CONV && setup_alias "$SHELL_CONFIG" "conv" "~/conv-manager"
+fi
+
+echo -e "${GREEN}Aliases added to ${SHELL_CONFIG}${NC}"
+
+# ---- Remote bashrc setup ----
+
+echo ""
+echo -e "${BOLD}Step 8: Setting up remote cluster aliases${NC}"
+echo ""
+
+if $SETUP_HPC; then
+    echo -e "${CYAN}Configuring HPC (.bashrc)...${NC}"
+    ssh hpc bash -s "$USERNAME" "$EMAIL" "$HPC_STORAGE" << 'REMOTE_HPC'
+USERNAME="$1"
+EMAIL="$2"
+HPC_STORAGE="$3"
+
+# Backup before modifying
+if [ -f ~/.bashrc ]; then
+    cp ~/.bashrc ~/.bashrc.pre-lip6-setup
+fi
+
+# Only add if not already present
+if ! grep -q "HPC Aliases" ~/.bashrc 2>/dev/null; then
+    cat >> ~/.bashrc << ALIASES
+
+# === HPC Aliases ===
+
+hpc-conda() {
+    source /etc/profile.d/modules.sh
+    module purge
+    module load python/anaconda3
+    eval "\\\$(conda shell.bash hook)"
+}
+
+hpc-small()  { oarsub -l /nodes=1/core=4,walltime=\${1:-8:0:0} -p "host like 'big%'" -I; }
+hpc-medium() { oarsub -l /nodes=1/core=12,walltime=\${1:-8:0:0} -p "host like 'big%'" -I; }
+hpc-large()  { oarsub -l /nodes=1/core=24,walltime=\${1:-8:0:0} -p "host like 'big%'" -I; }
+hpc-bigram() { oarsub -l /nodes=1/core=20,walltime=\${1:-8:0:0} -p "host='big25'" -I; }
+hpc-grab()   { oarsub -l /nodes=1/core=\${1:-4},walltime=\${2:-8:0:0} -p "host like 'big%'" -I; }
+
+alias hpc-jobs='oarstat'
+alias hpc-myjobs='oarstat -u ${USERNAME}'
+alias hpc-kill='oardel'
+alias hpc-connect='oarsub -C'
+alias hpc-nodes='oarnodes -l'
+alias hpc-run='oarsub -S'
+
+hpc-log() { cat ~/OAR."\$1".stdout; }
+hpc-err() { cat ~/OAR."\$1".stderr; }
+
+hpc-help() {
+    echo "=== HPC Quick Reference ==="
+    echo ""
+    echo "SESSIONS (all default 8h, override: hpc-small 24:0:0)"
+    echo "  hpc-small  [time]    4 cores  (~16-24 GB RAM)"
+    echo "  hpc-medium [time]   12 cores  (~48-72 GB RAM)"
+    echo "  hpc-large  [time]   24 cores  (~96 GB RAM)"
+    echo "  hpc-bigram [time]   20 cores on big25 (128 GB RAM)"
+    echo "  hpc-grab CORES TIME  custom, e.g. hpc-grab 48 24:0:0"
+    echo ""
+    echo "JOBS"
+    echo "  hpc-jobs             list all running jobs"
+    echo "  hpc-myjobs           list my jobs"
+    echo "  hpc-run ~/script.sh  submit batch job (up to 1000h)"
+    echo "  hpc-connect JOBID    ssh into a running job"
+    echo "  hpc-kill JOBID       kill a job"
+    echo "  hpc-log JOBID        view job stdout"
+    echo "  hpc-err JOBID        view job stderr"
+    echo ""
+    echo "SETUP"
+    echo "  hpc-conda            load conda + anaconda3 module"
+    echo "  hpc-nodes            list all cluster nodes"
+    echo ""
+    echo "STORAGE"
+    echo "  ~/                   home dir (NFS shared across nodes)"
+    echo "  ${HPC_STORAGE}   team storage"
+}
+ALIASES
+    echo "HPC aliases added."
+else
+    echo "HPC aliases already present."
+fi
+REMOTE_HPC
+    echo -e "${GREEN}HPC aliases configured.${NC}"
+fi
+
+if $SETUP_CONV; then
+    echo -e "${CYAN}Configuring Convergence (.bashrc)...${NC}"
+    ssh conv bash -s "$USERNAME" "$EMAIL" << 'REMOTE_CONV'
+USERNAME="$1"
+EMAIL="$2"
+
+# Backup before modifying
+if [ -f ~/.bashrc ]; then
+    cp ~/.bashrc ~/.bashrc.pre-lip6-setup
+fi
+
+if ! grep -q "Convergence Cluster Aliases" ~/.bashrc 2>/dev/null; then
+    cat >> ~/.bashrc << ALIASES
+
+# === Convergence Cluster Aliases ===
+
+conv-conda() {
+    source /etc/profile.d/modules.sh 2>/dev/null
+    module purge
+    module load python/anaconda3
+    eval "\\\$(conda shell.bash hook)"
+}
+
+alias conv-jobs='squeue -u ${USERNAME}'
+alias conv-status='sinfo -p convergence --Node -O "nodelist:10,cpusstate:16,gres:35,gresused:35,statelong:12"'
+alias conv-kill='scancel'
+
+conv-log() { cat ~/*-"\$1".out 2>/dev/null; }
+conv-err() { cat ~/*-"\$1".err 2>/dev/null; }
+
+conv-help() {
+    echo "=== Convergence Quick Reference ==="
+    echo ""
+    echo "GPU TYPES (must specify in reservations)"
+    echo "  a100_7g.80gb    Full A100 80GB (node01-06)"
+    echo "  a100_3g.40gb    MIG A100 40GB  (node07-10)"
+    echo ""
+    echo "INTERACTIVE"
+    echo "  salloc --gpus-per-node=a100_7g.80gb:1 --time=08:00:00"
+    echo "  salloc --gpus-per-node=a100_3g.40gb:2 --time=08:00:00"
+    echo "  salloc --exclusive --mem=0 --time=08:00:00    (full node)"
+    echo ""
+    echo "BATCH"
+    echo "  sbatch my_script.sh"
+    echo ""
+    echo "JOBS"
+    echo "  conv-jobs        list my jobs"
+    echo "  conv-status      cluster GPU usage"
+    echo "  conv-kill JOBID  cancel a job"
+    echo "  conv-log JOBID   view job stdout"
+    echo "  conv-err JOBID   view job stderr"
+    echo ""
+    echo "SETUP"
+    echo "  conv-conda       load conda + anaconda3"
+    echo ""
+    echo "STORAGE"
+    echo "  ~/               home (300TB NFS, shared)"
+    echo "  /scratch/        local NVME (1.6TB, per-node, NOT shared)"
+    echo ""
+    echo "LIMITS"
+    echo "  Default time:    1 hour"
+    echo "  Max time:        15 days"
+    echo "  Per GPU default: 8 threads + 64GB RAM"
+}
+ALIASES
+    echo "Convergence aliases added."
+else
+    echo "Convergence aliases already present."
+fi
+
+# Disable conda auto-activate
+conda config --set auto_activate_base false 2>/dev/null || true
+REMOTE_CONV
+    echo -e "${GREEN}Convergence aliases configured.${NC}"
+fi
+
+# ---- Done ----
+
+echo ""
+echo -e "${GREEN}================================================================${NC}"
+echo -e "${GREEN}  Setup complete!${NC}"
+echo -e "${GREEN}================================================================${NC}"
+echo ""
+echo -e "${BOLD}Open a new terminal, then:${NC}"
+echo ""
+if $SETUP_HPC; then
+    echo -e "  ${GREEN}hpc${NC}   — CPU cluster manager (OAR, up to 48 cores)"
+fi
+if $SETUP_CONV; then
+    echo -e "  ${GREEN}conv${NC}  — GPU cluster manager (SLURM, A100 GPUs)"
+fi
+echo ""
+echo -e "${BOLD}Quick SSH:${NC}"
+echo ""
+if $SETUP_HPC; then
+    echo -e "  ${GREEN}ssh hpc${NC}    — login to HPC cluster"
+fi
+if $SETUP_CONV; then
+    echo -e "  ${GREEN}ssh conv${NC}   — login to Convergence"
+fi
+echo ""
+echo -e "${BOLD}On the cluster, type:${NC}"
+echo ""
+if $SETUP_HPC; then
+    echo -e "  ${GREEN}hpc-help${NC}   — HPC commands reference"
+fi
+if $SETUP_CONV; then
+    echo -e "  ${GREEN}conv-help${NC}  — Convergence commands reference"
+fi
+echo ""
+echo -e "${DIM}Happy computing!${NC}"
+echo ""
