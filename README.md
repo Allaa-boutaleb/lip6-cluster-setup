@@ -106,7 +106,7 @@ conv-status     # Cluster GPU usage
 
 ## Requirements
 
-- macOS or Linux (local machine)
+- macOS or Linux (local machine), or WSL on Windows.
 - `ssh`, `ssh-keygen`, `ssh-copy-id`
 - A valid LIP6 account with cluster access
 - Your LIP6 secure password (wifi/workstation, **not** email password)
