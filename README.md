@@ -7,6 +7,9 @@ Supports both the **HPC cluster** (CPU, OAR scheduler) and the **Convergence clu
 ## What it does
 
 ```
+git clone https://github.com/Allaa-boutaleb/lip6-cluster-setup.git
+cd lip6-cluster-setup/
+chmod +x lip6-cluster-setup
 ./lip6-cluster-setup
 ```
 
