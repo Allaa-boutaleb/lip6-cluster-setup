@@ -12,6 +12,12 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# ---- Input validation ----
+
+is_int()  { [[ "$1" =~ ^[0-9]+$ ]]; }
+is_wall() { [[ "$1" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; }
+is_name() { [[ "$1" =~ ^[a-zA-Z0-9_.-]+$ ]]; }
+
 welcome() {
     echo ""
     echo -e "${BLUE}================================================${NC}"
@@ -39,12 +45,20 @@ launch_session() {
     echo -e "  ${DIM}Press Enter for 24${NC}"
     read -p "> " cores
     cores="${cores:-24}"
+    if ! is_int "$cores"; then
+        echo -e "${RED}Core count must be a number (e.g. 4, 12, 24).${NC}"
+        return
+    fi
 
     echo ""
     echo -e "${BOLD}How long do you need?${NC}"
     echo -e "  ${DIM}Press Enter for 24 hours (format: H:M:S)${NC}"
     read -p "> " wall
     wall="${wall:-24:0:0}"
+    if ! is_wall "$wall"; then
+        echo -e "${RED}Invalid format. Use H:M:S (e.g. 8:0:0 or 24:0:0).${NC}"
+        return
+    fi
 
     echo ""
     echo -e "${BOLD}How do you want to work?${NC}"
@@ -54,6 +68,10 @@ launch_session() {
     echo ""
     read -p "> " mode
     mode="${mode:-1}"
+    if ! [[ "$mode" =~ ^[1-3]$ ]]; then
+        echo -e "${RED}Choose 1, 2, or 3.${NC}"
+        return
+    fi
 
     local port=8888
 
@@ -61,7 +79,6 @@ launch_session() {
     echo -e "${CYAN}Submitting job: ${cores} cores, ${wall}...${NC}"
 
     if [ "$mode" = "2" ]; then
-        # Interactive terminal session — just tell user to run it on cluster
         echo ""
         echo -e "${YELLOW}Terminal mode requires an interactive OAR session.${NC}"
         echo -e "Opening SSH to the cluster..."
@@ -73,7 +90,6 @@ launch_session() {
         return
     fi
 
-    # Jupyter or Both mode — submit batch job
     JOBID=$(ssh hpc bash -s "$cores" "$wall" "$port" << 'REMOTE'
 CORES="$1"
 WALL="$2"
@@ -96,7 +112,7 @@ oarsub -S ~/._jupyter_job.sh 2>&1 | grep -oP 'OAR_JOB_ID=\K[0-9]+'
 REMOTE
     )
 
-    if [ -z "$JOBID" ]; then
+    if [ -z "$JOBID" ] || ! is_int "$JOBID"; then
         echo -e "${RED}Failed to submit job.${NC}"
         return
     fi
@@ -106,7 +122,7 @@ REMOTE
 
     local attempts=0
     while true; do
-        STATE=$(ssh hpc "oarstat -f -j $JOBID 2>/dev/null | grep 'state =' | head -1 | awk -F= '{print \$2}' | tr -d ' '")
+        STATE=$(ssh hpc "oarstat -f -j '$JOBID' 2>/dev/null | grep 'state =' | head -1 | awk -F= '{print \$2}' | tr -d ' '")
         if [ "$STATE" = "Running" ]; then
             break
         elif [ "$STATE" = "Error" ] || [ "$STATE" = "Terminated" ]; then
@@ -120,7 +136,7 @@ REMOTE
             echo -e "Use option 2 to connect later, or option 4 to cancel."
             return
         fi
-        echo -e "  ${DIM}Queued... ($((attempts * 5))s)${NC}"
+        echo -e "  ${DIM}${STATE:-Queued}... ($((attempts * 5))s)${NC}"
         sleep 5
     done
 
@@ -132,8 +148,9 @@ connect_to_job() {
     local port="${2:-8888}"
     local mode="${3:-1}"
 
-    local node=$(ssh hpc "oarstat -f -j $jobid 2>/dev/null | grep 'assigned_hostnames' | awk '{print \$3}'")
-    if [ -z "$node" ]; then
+    local node
+    node=$(ssh hpc "oarstat -f -j '$jobid' 2>/dev/null | grep 'assigned_hostnames' | awk '{print \$3}'")
+    if [ -z "$node" ] || ! is_name "$node"; then
         echo -e "${RED}Could not find node for job $jobid${NC}"
         return
     fi
@@ -142,7 +159,7 @@ connect_to_job() {
 
     local url=""
     for i in $(seq 1 30); do
-        url=$(ssh hpc "grep -o 'http://[^ ]*' ~/OAR.${jobid}.stderr 2>/dev/null | tail -1")
+        url=$(ssh hpc "grep -o 'http://[^ ]*' ~/OAR.'${jobid}'.stderr 2>/dev/null | tail -1")
         if [ -n "$url" ]; then
             break
         fi
@@ -155,7 +172,12 @@ connect_to_job() {
         return
     fi
 
-    local local_url=$(echo "$url" | sed "s|http://[^:]*:|http://localhost:|")
+    # Parse actual port from Jupyter URL (handles port conflicts)
+    local actual_port
+    actual_port=$(echo "$url" | grep -oP ':\K[0-9]+(?=/)' | head -1)
+    actual_port="${actual_port:-$port}"
+    local local_url
+    local_url=$(echo "$url" | sed "s|http://[^:]*:|http://localhost:|")
 
     echo ""
     echo -e "${GREEN}================================================${NC}"
@@ -168,7 +190,6 @@ connect_to_job() {
     echo ""
 
     if [ "$mode" = "3" ]; then
-        # Both mode: open browser, show terminal command
         echo -e "${CYAN}Opening Jupyter in browser...${NC}"
         if command -v xdg-open &>/dev/null; then
             xdg-open "$local_url" 2>/dev/null &
@@ -186,9 +207,8 @@ connect_to_job() {
         echo ""
         echo -e "${DIM}Tunnel active. Ctrl+C to disconnect (job keeps running).${NC}"
         echo ""
-        ssh -N -L ${port}:${node}:${port} hpc
+        ssh -N -L "${actual_port}:${node}:${actual_port}" hpc
     elif [ "$mode" = "1" ]; then
-        # Jupyter only
         echo -e "${CYAN}Opening Jupyter in browser...${NC}"
         if command -v xdg-open &>/dev/null; then
             xdg-open "$local_url" 2>/dev/null &
@@ -197,13 +217,14 @@ connect_to_job() {
         fi
         echo -e "${DIM}Tunnel active. Ctrl+C to disconnect (job keeps running).${NC}"
         echo ""
-        ssh -N -L ${port}:${node}:${port} hpc
+        ssh -N -L "${actual_port}:${node}:${actual_port}" hpc
     fi
 }
 
 my_jobs() {
     echo ""
-    local output=$(ssh hpc "oarstat -u boutalebm 2>/dev/null")
+    local output
+    output=$(ssh hpc "oarstat -u boutalebm 2>/dev/null")
     if echo "$output" | grep -q "^[0-9]"; then
         echo -e "${BOLD}Your jobs:${NC}"
         echo ""
@@ -216,7 +237,8 @@ my_jobs() {
 
 cancel_job() {
     echo ""
-    local output=$(ssh hpc "oarstat -u boutalebm 2>/dev/null")
+    local output
+    output=$(ssh hpc "oarstat -u boutalebm 2>/dev/null")
     if ! echo "$output" | grep -q "^[0-9]"; then
         echo -e "${DIM}No running jobs to cancel.${NC}"
         return
@@ -230,15 +252,18 @@ cancel_job() {
     if [ "$jobid" = "all" ]; then
         ssh hpc "for jid in \$(oarstat -u boutalebm 2>/dev/null | awk '/^[0-9]/{print \$1}'); do oardel \$jid; echo \"Cancelled \$jid\"; done"
         echo -e "${GREEN}Done.${NC}"
-    elif [ -n "$jobid" ]; then
-        ssh hpc "oardel $jobid"
+    elif is_int "$jobid"; then
+        ssh hpc "oardel '$jobid'"
         echo -e "${GREEN}Job $jobid cancelled.${NC}"
+    elif [ -n "$jobid" ]; then
+        echo -e "${RED}Invalid job ID (must be a number).${NC}"
     fi
 }
 
 connect_existing() {
     echo ""
-    local output=$(ssh hpc "oarstat -u boutalebm 2>/dev/null")
+    local output
+    output=$(ssh hpc "oarstat -u boutalebm 2>/dev/null")
     if ! echo "$output" | grep -q "^[0-9]"; then
         echo -e "${DIM}No running jobs to connect to.${NC}"
         return
@@ -258,26 +283,39 @@ connect_existing() {
         echo -e "Which job do you want to connect to?"
         read -p "> " jobid
     fi
-    if [ -n "$jobid" ]; then
-        echo ""
-        echo -e "${BOLD}How do you want to connect?${NC}"
-        echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
-        echo -e "  ${GREEN}2${NC})  Terminal only"
-        echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
-        echo ""
-        read -p "> " mode
-        mode="${mode:-1}"
-        if [ "$mode" = "2" ]; then
-            local node=$(ssh hpc "oarstat -f -j $jobid 2>/dev/null | grep 'assigned_hostnames' | awk '{print \$3}'")
-            if [ -z "$node" ]; then
-                echo -e "${RED}Could not find node for job $jobid${NC}"
-                return
-            fi
-            echo -e "${CYAN}Connecting to $node...${NC}"
-            ssh hpc "OAR_JOB_ID=$jobid oarsh $node"
-        else
-            connect_to_job "$jobid" 8888 "$mode"
+
+    if [ -z "$jobid" ]; then
+        return
+    fi
+    if ! is_int "$jobid"; then
+        echo -e "${RED}Invalid job ID (must be a number).${NC}"
+        return
+    fi
+
+    echo ""
+    echo -e "${BOLD}How do you want to connect?${NC}"
+    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
+    echo -e "  ${GREEN}2${NC})  Terminal only"
+    echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
+    echo ""
+    read -p "> " mode
+    mode="${mode:-1}"
+    if ! [[ "$mode" =~ ^[1-3]$ ]]; then
+        echo -e "${RED}Choose 1, 2, or 3.${NC}"
+        return
+    fi
+
+    if [ "$mode" = "2" ]; then
+        local node
+        node=$(ssh hpc "oarstat -f -j '$jobid' 2>/dev/null | grep 'assigned_hostnames' | awk '{print \$3}'")
+        if [ -z "$node" ] || ! is_name "$node"; then
+            echo -e "${RED}Could not find node for job $jobid${NC}"
+            return
         fi
+        echo -e "${CYAN}Connecting to $node...${NC}"
+        ssh -t hpc "OAR_JOB_ID='$jobid' oarsh '$node'"
+    else
+        connect_to_job "$jobid" 8888 "$mode"
     fi
 }
 

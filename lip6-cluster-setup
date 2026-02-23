@@ -104,23 +104,27 @@ if [ "$1" = "--reset" ] || [ "$1" = "--uninstall" ]; then
         fi
     done
 
-    # Remove SSH config (restore backup if exists)
+    # Remove LIP6 SSH config
+    if [ -f ~/.ssh/config.d/lip6 ]; then
+        rm ~/.ssh/config.d/lip6
+        echo -e "  ${GREEN}Removed${NC} ~/.ssh/config.d/lip6"
+    fi
+    # Restore main SSH config from backup (in case Include was added)
     LATEST_BACKUP=$(ls -t ~/.ssh/config.backup.* 2>/dev/null | head -1)
     if [ -n "$LATEST_BACKUP" ]; then
         cp "$LATEST_BACKUP" ~/.ssh/config
         echo -e "  ${GREEN}Restored${NC} SSH config from backup (${LATEST_BACKUP})"
-    elif [ -f ~/.ssh/config ]; then
-        rm ~/.ssh/config
-        echo -e "  ${GREEN}Removed${NC} SSH config"
     else
-        echo -e "  ${DIM}No SSH config to remove.${NC}"
+        echo -e "  ${DIM}No SSH config backup to restore.${NC}"
     fi
 
     # Remove aliases from shell configs
     for rc in ~/.bashrc ~/.zshrc ~/.config/fish/config.fish; do
         if [ -f "$rc" ] && grep -q 'alias hpc=\|alias conv=' "$rc" 2>/dev/null; then
-            grep -v 'alias hpc=' "$rc" | grep -v 'alias conv=' > "${rc}.tmp" 2>/dev/null || true
-            mv "${rc}.tmp" "$rc"
+            local tmpfile
+            tmpfile=$(mktemp "${rc}.XXXXXX")
+            grep -v 'alias hpc=' "$rc" | grep -v 'alias conv=' > "$tmpfile" 2>/dev/null || true
+            mv "$tmpfile" "$rc"
             echo -e "  ${GREEN}Cleaned${NC} aliases from $rc"
         fi
     done
@@ -229,8 +233,8 @@ USERNAME=$(ask \
 EMAIL=$(ask \
     "Email (e.g. firstname.lastname@lip6.fr)" \
     "" \
-    "^[^@]+@[^@]+\.[^@]+$" \
-    "Must be a valid email address (e.g. firstname.lastname@lip6.fr).")
+    "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$" \
+    "Must be a valid email address (letters, digits, dots — e.g. firstname.lastname@lip6.fr).")
 
 echo ""
 echo -e "${BOLD}Which team are you on?${NC}"
@@ -319,6 +323,9 @@ else
     mkdir -p ~/.ssh
     ssh-keygen -t ed25519 -C "$EMAIL" -f "$SSH_KEY" -N ""
     echo -e "${GREEN}SSH key generated:${NC} $SSH_KEY"
+    echo ""
+    echo -e "${YELLOW}Note:${NC} The key was created without a passphrase for convenience."
+    echo -e "${DIM}To add a passphrase later: ssh-keygen -p -f $SSH_KEY${NC}"
 fi
 
 chmod 700 ~/.ssh
@@ -332,6 +339,7 @@ echo -e "${BOLD}Step 3: SSH config${NC}"
 echo ""
 
 SSH_CONFIG="$HOME/.ssh/config"
+SSH_LIP6_CONFIG="$HOME/.ssh/config.d/lip6"
 
 # Backup existing config
 if [ -f "$SSH_CONFIG" ]; then
@@ -339,7 +347,24 @@ if [ -f "$SSH_CONFIG" ]; then
     echo -e "${DIM}Backed up existing config to ${SSH_CONFIG}.backup.*${NC}"
 fi
 
-# Build config
+# Use Include-based approach to preserve existing SSH config entries
+mkdir -p "$HOME/.ssh/config.d"
+if [ ! -f "$SSH_CONFIG" ] || ! grep -q 'Include config.d/\*' "$SSH_CONFIG" 2>/dev/null; then
+    # Prepend Include directive (must be at top of config)
+    if [ -f "$SSH_CONFIG" ]; then
+        local tmpfile
+        tmpfile=$(mktemp "${SSH_CONFIG}.XXXXXX")
+        echo "Include config.d/*" > "$tmpfile"
+        echo "" >> "$tmpfile"
+        cat "$SSH_CONFIG" >> "$tmpfile"
+        mv "$tmpfile" "$SSH_CONFIG"
+    else
+        echo "Include config.d/*" > "$SSH_CONFIG"
+    fi
+    echo -e "${DIM}Added Include directive to ${SSH_CONFIG}${NC}"
+fi
+
+# Build LIP6-specific config in config.d/
 {
     echo "# ==================================================================="
     echo "# LIP6 Cluster SSH Config"
@@ -350,6 +375,7 @@ fi
     echo "    HostName $GATEWAY"
     echo "    User $USERNAME"
     echo "    IdentityFile $SSH_KEY"
+    echo "    StrictHostKeyChecking accept-new"
     echo ""
 
     if $SETUP_HPC; then
@@ -360,6 +386,7 @@ fi
         echo "    IdentityFile $SSH_KEY"
         echo "    ServerAliveInterval 60"
         echo "    ServerAliveCountMax 3"
+        echo "    StrictHostKeyChecking accept-new"
         echo ""
     fi
 
@@ -371,6 +398,7 @@ fi
         echo "    IdentityFile $SSH_KEY"
         echo "    ServerAliveInterval 60"
         echo "    ServerAliveCountMax 3"
+        echo "    StrictHostKeyChecking accept-new"
         echo ""
         echo "Host *.convergence.lip6.fr"
         echo "    User $USERNAME"
@@ -378,12 +406,15 @@ fi
         echo "    IdentityFile $SSH_KEY"
         echo "    ServerAliveInterval 60"
         echo "    ServerAliveCountMax 3"
+        echo "    StrictHostKeyChecking accept-new"
         echo ""
     fi
-} > "$SSH_CONFIG"
+} > "$SSH_LIP6_CONFIG"
 
 chmod 600 "$SSH_CONFIG"
-echo -e "${GREEN}SSH config written to ${SSH_CONFIG}${NC}"
+chmod 600 "$SSH_LIP6_CONFIG"
+echo -e "${GREEN}SSH config written to ${SSH_LIP6_CONFIG}${NC}"
+echo -e "${DIM}Your existing SSH config entries in ${SSH_CONFIG} are preserved.${NC}"
 
 # ---- Copy SSH Keys ----
 
@@ -479,6 +510,10 @@ NC='\033[0m'
 
 HPC_USER="__USERNAME__"
 
+is_int()  { [[ "$1" =~ ^[0-9]+$ ]]; }
+is_wall() { [[ "$1" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; }
+is_name() { [[ "$1" =~ ^[a-zA-Z0-9_.-]+$ ]]; }
+
 welcome() {
     echo ""
     echo -e "${BLUE}================================================${NC}"
@@ -506,12 +541,20 @@ launch_session() {
     echo -e "  ${DIM}Press Enter for 24${NC}"
     read -p "> " cores
     cores="${cores:-24}"
+    if ! is_int "$cores"; then
+        echo -e "${RED}Core count must be a number (e.g. 4, 12, 24).${NC}"
+        return
+    fi
 
     echo ""
     echo -e "${BOLD}How long do you need?${NC}"
     echo -e "  ${DIM}Press Enter for 24 hours (format: H:M:S)${NC}"
     read -p "> " wall
     wall="${wall:-24:0:0}"
+    if ! is_wall "$wall"; then
+        echo -e "${RED}Invalid format. Use H:M:S (e.g. 8:0:0 or 24:0:0).${NC}"
+        return
+    fi
 
     echo ""
     echo -e "${BOLD}How do you want to work?${NC}"
@@ -521,8 +564,15 @@ launch_session() {
     echo ""
     read -p "> " mode
     mode="${mode:-1}"
+    if ! [[ "$mode" =~ ^[1-3]$ ]]; then
+        echo -e "${RED}Choose 1, 2, or 3.${NC}"
+        return
+    fi
 
     local port=8888
+
+    echo ""
+    echo -e "${CYAN}Submitting job: ${cores} cores, ${wall}...${NC}"
 
     if [ "$mode" = "2" ]; then
         echo ""
@@ -535,9 +585,6 @@ launch_session() {
         ssh hpc
         return
     fi
-
-    echo ""
-    echo -e "${CYAN}Submitting Jupyter Lab (${cores} cores, ${wall})...${NC}"
 
     JOBID=$(ssh hpc bash -s "$cores" "$wall" "$port" << 'REMOTE'
 CORES="$1"
@@ -560,7 +607,7 @@ oarsub -S ~/._jupyter_job.sh 2>&1 | grep -oP 'OAR_JOB_ID=\K[0-9]+'
 REMOTE
     )
 
-    if [ -z "$JOBID" ]; then
+    if [ -z "$JOBID" ] || ! is_int "$JOBID"; then
         echo -e "${RED}Failed to submit job.${NC}"
         return
     fi
@@ -570,7 +617,7 @@ REMOTE
 
     local attempts=0
     while true; do
-        STATE=$(ssh hpc "oarstat -f -j $JOBID 2>/dev/null | grep 'state =' | head -1 | awk -F= '{print \$2}' | tr -d ' '")
+        STATE=$(ssh hpc "oarstat -f -j '$JOBID' 2>/dev/null | grep 'state =' | head -1 | awk -F= '{print \$2}' | tr -d ' '")
         if [ "$STATE" = "Running" ]; then
             break
         elif [ "$STATE" = "Error" ] || [ "$STATE" = "Terminated" ]; then
@@ -596,8 +643,9 @@ connect_to_job() {
     local port="${2:-8888}"
     local mode="${3:-1}"
 
-    local node=$(ssh hpc "oarstat -f -j $jobid 2>/dev/null | grep 'assigned_hostnames' | awk '{print \$3}'")
-    if [ -z "$node" ]; then
+    local node
+    node=$(ssh hpc "oarstat -f -j '$jobid' 2>/dev/null | grep 'assigned_hostnames' | awk '{print \$3}'")
+    if [ -z "$node" ] || ! is_name "$node"; then
         echo -e "${RED}Could not find node for job $jobid${NC}"
         return
     fi
@@ -606,7 +654,7 @@ connect_to_job() {
 
     local url=""
     for i in $(seq 1 30); do
-        url=$(ssh hpc "grep -o 'http://[^ ]*' ~/OAR.${jobid}.stderr 2>/dev/null | tail -1")
+        url=$(ssh hpc "grep -o 'http://[^ ]*' ~/OAR.'${jobid}'.stderr 2>/dev/null | tail -1")
         if [ -n "$url" ]; then
             break
         fi
@@ -619,7 +667,11 @@ connect_to_job() {
         return
     fi
 
-    local local_url=$(echo "$url" | sed "s|http://[^:]*:|http://localhost:|")
+    local actual_port
+    actual_port=$(echo "$url" | grep -oP ':\K[0-9]+(?=/)' | head -1)
+    actual_port="${actual_port:-$port}"
+    local local_url
+    local_url=$(echo "$url" | sed "s|http://[^:]*:|http://localhost:|")
 
     echo ""
     echo -e "${GREEN}================================================${NC}"
@@ -643,9 +695,13 @@ connect_to_job() {
         echo ""
         echo -e "  ${GREEN}ssh -t hpc \"OAR_JOB_ID=$jobid oarsh $node\"${NC}"
         echo ""
+        echo -e "${DIM}Or with Kitty:${NC}"
+        echo ""
+        echo -e "  ${GREEN}kitty +kitten ssh -t hpc \"OAR_JOB_ID=$jobid oarsh $node\"${NC}"
+        echo ""
         echo -e "${DIM}Tunnel active. Ctrl+C to disconnect (job keeps running).${NC}"
         echo ""
-        ssh -N -L ${port}:${node}:${port} hpc
+        ssh -N -L "${actual_port}:${node}:${actual_port}" hpc
     elif [ "$mode" = "1" ]; then
         echo -e "${CYAN}Opening Jupyter in browser...${NC}"
         if command -v xdg-open &>/dev/null; then
@@ -655,13 +711,14 @@ connect_to_job() {
         fi
         echo -e "${DIM}Tunnel active. Ctrl+C to disconnect (job keeps running).${NC}"
         echo ""
-        ssh -N -L ${port}:${node}:${port} hpc
+        ssh -N -L "${actual_port}:${node}:${actual_port}" hpc
     fi
 }
 
 my_jobs() {
     echo ""
-    local output=$(ssh hpc "oarstat -u ${HPC_USER} 2>/dev/null")
+    local output
+    output=$(ssh hpc "oarstat -u ${HPC_USER} 2>/dev/null")
     if echo "$output" | grep -q "^[0-9]"; then
         echo -e "${BOLD}Your jobs:${NC}"
         echo ""
@@ -674,7 +731,8 @@ my_jobs() {
 
 cancel_job() {
     echo ""
-    local output=$(ssh hpc "oarstat -u ${HPC_USER} 2>/dev/null")
+    local output
+    output=$(ssh hpc "oarstat -u ${HPC_USER} 2>/dev/null")
     if ! echo "$output" | grep -q "^[0-9]"; then
         echo -e "${DIM}No running jobs to cancel.${NC}"
         return
@@ -688,15 +746,18 @@ cancel_job() {
     if [ "$jobid" = "all" ]; then
         ssh hpc "for jid in \$(oarstat -u ${HPC_USER} 2>/dev/null | awk '/^[0-9]/{print \$1}'); do oardel \$jid; echo \"Cancelled \$jid\"; done"
         echo -e "${GREEN}Done.${NC}"
-    elif [ -n "$jobid" ]; then
-        ssh hpc "oardel $jobid"
+    elif is_int "$jobid"; then
+        ssh hpc "oardel '$jobid'"
         echo -e "${GREEN}Job $jobid cancelled.${NC}"
+    elif [ -n "$jobid" ]; then
+        echo -e "${RED}Invalid job ID (must be a number).${NC}"
     fi
 }
 
 connect_existing() {
     echo ""
-    local output=$(ssh hpc "oarstat -u ${HPC_USER} 2>/dev/null")
+    local output
+    output=$(ssh hpc "oarstat -u ${HPC_USER} 2>/dev/null")
     if ! echo "$output" | grep -q "^[0-9]"; then
         echo -e "${DIM}No running jobs to connect to.${NC}"
         return
@@ -717,26 +778,38 @@ connect_existing() {
         read -p "> " jobid
     fi
 
-    if [ -n "$jobid" ]; then
-        echo ""
-        echo -e "${BOLD}How do you want to connect?${NC}"
-        echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
-        echo -e "  ${GREEN}2${NC})  Terminal only"
-        echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
-        echo ""
-        read -p "> " mode
-        mode="${mode:-1}"
-        if [ "$mode" = "2" ]; then
-            local node=$(ssh hpc "oarstat -f -j $jobid 2>/dev/null | grep 'assigned_hostnames' | awk '{print \$3}'")
-            if [ -z "$node" ]; then
-                echo -e "${RED}Could not find node for job $jobid${NC}"
-                return
-            fi
-            echo -e "${CYAN}Connecting to $node...${NC}"
-            ssh hpc "OAR_JOB_ID=$jobid oarsh $node"
-        else
-            connect_to_job "$jobid" 8888 "$mode"
+    if [ -z "$jobid" ]; then
+        return
+    fi
+    if ! is_int "$jobid"; then
+        echo -e "${RED}Invalid job ID (must be a number).${NC}"
+        return
+    fi
+
+    echo ""
+    echo -e "${BOLD}How do you want to connect?${NC}"
+    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
+    echo -e "  ${GREEN}2${NC})  Terminal only"
+    echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
+    echo ""
+    read -p "> " mode
+    mode="${mode:-1}"
+    if ! [[ "$mode" =~ ^[1-3]$ ]]; then
+        echo -e "${RED}Choose 1, 2, or 3.${NC}"
+        return
+    fi
+
+    if [ "$mode" = "2" ]; then
+        local node
+        node=$(ssh hpc "oarstat -f -j '$jobid' 2>/dev/null | grep 'assigned_hostnames' | awk '{print \$3}'")
+        if [ -z "$node" ] || ! is_name "$node"; then
+            echo -e "${RED}Could not find node for job $jobid${NC}"
+            return
         fi
+        echo -e "${CYAN}Connecting to $node...${NC}"
+        ssh -t hpc "OAR_JOB_ID='$jobid' oarsh '$node'"
+    else
+        connect_to_job "$jobid" 8888 "$mode"
     fi
 }
 
@@ -756,9 +829,10 @@ while true; do
 done
 HPC_SCRIPT
 
-    # Replace placeholders
-    sed -i "s/__USERNAME__/${USERNAME}/g" "${INSTALL_DIR}/hpc-notebook"
-    sed -i "s/__EMAIL__/${EMAIL}/g" "${INSTALL_DIR}/hpc-notebook"
+    # Replace placeholders (use | delimiter to avoid issues with special chars)
+    ESCAPED_EMAIL=$(printf '%s\n' "$EMAIL" | sed 's/[&/\]/\\&/g')
+    sed -i "s|__USERNAME__|${USERNAME}|g" "${INSTALL_DIR}/hpc-notebook"
+    sed -i "s|__EMAIL__|${ESCAPED_EMAIL}|g" "${INSTALL_DIR}/hpc-notebook"
     chmod +x "${INSTALL_DIR}/hpc-notebook"
     echo -e "${GREEN}Installed:${NC} ~/hpc-notebook (alias: hpc)"
 fi
@@ -782,6 +856,11 @@ NC='\033[0m'
 
 CONV_USER="__USERNAME__"
 CONV_PORT=9888
+
+is_int()  { [[ "$1" =~ ^[0-9]+$ ]]; }
+is_wall() { [[ "$1" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; }
+is_name() { [[ "$1" =~ ^[a-zA-Z0-9_.-]+$ ]]; }
+is_path() { [[ "$1" =~ ^[a-zA-Z0-9_.~/-]+$ ]]; }
 
 welcome() {
     echo ""
@@ -830,18 +909,30 @@ launch_session() {
     echo -e "  ${DIM}Press Enter for 1 (max 4 per node for full, 8 for MIG)${NC}"
     read -p "> " num_gpus
     num_gpus="${num_gpus:-1}"
+    if ! is_int "$num_gpus"; then
+        echo -e "${RED}GPU count must be a number (e.g. 1, 2, 4).${NC}"
+        return
+    fi
 
     echo ""
     echo -e "${BOLD}How long do you need?${NC}"
     echo -e "  ${DIM}Press Enter for 8 hours (format: HH:MM:SS, max 15 days)${NC}"
     read -p "> " wall
     wall="${wall:-08:00:00}"
+    if ! is_wall "$wall"; then
+        echo -e "${RED}Invalid format. Use HH:MM:SS (e.g. 08:00:00).${NC}"
+        return
+    fi
 
     echo ""
     echo -e "${BOLD}Job name?${NC}"
-    echo -e "  ${DIM}Press Enter for 'gpu-session'${NC}"
+    echo -e "  ${DIM}Press Enter for 'gpu-session' (letters, digits, hyphens, underscores only)${NC}"
     read -p "> " job_name
     job_name="${job_name:-gpu-session}"
+    if ! is_name "$job_name"; then
+        echo -e "${RED}Invalid job name. Use only letters, digits, hyphens, underscores.${NC}"
+        return
+    fi
 
     echo ""
     echo -e "${BOLD}How do you want to work?${NC}"
@@ -852,6 +943,10 @@ launch_session() {
     echo ""
     read -p "> " mode
     mode="${mode:-1}"
+    if ! [[ "$mode" =~ ^[1-4]$ ]]; then
+        echo -e "${RED}Choose 1, 2, 3, or 4.${NC}"
+        return
+    fi
 
     if [ "$mode" = "4" ]; then
         submit_custom "$num_gpus" "$wall" "$job_name"
@@ -864,7 +959,7 @@ launch_session() {
         echo -e "${DIM}This is interactive — dies when you disconnect.${NC}"
         echo -e "${DIM}Use option 1 or 3 for persistent Jupyter sessions.${NC}"
         echo ""
-        ssh -t conv "salloc --job-name=${job_name} --nodes=1 --gpus-per-node=${GPU_TYPE}:${num_gpus} --time=${wall}"
+        ssh -t conv "salloc --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'"
         return
     fi
 
@@ -899,7 +994,7 @@ sbatch ~/._conv_jupyter.sh 2>&1 | grep -oP 'Submitted batch job \K[0-9]+'
 REMOTE
     )
 
-    if [ -z "$JOBID" ]; then
+    if [ -z "$JOBID" ] || ! is_int "$JOBID"; then
         echo -e "${RED}Failed to submit job.${NC}"
         return
     fi
@@ -910,7 +1005,7 @@ REMOTE
 
     local attempts=0
     while true; do
-        STATE=$(ssh conv "squeue -j $JOBID -h -o '%T' 2>/dev/null" 2>/dev/null)
+        STATE=$(ssh conv "squeue -j '$JOBID' -h -o '%T' 2>/dev/null" 2>/dev/null)
         if [ "$STATE" = "RUNNING" ]; then
             break
         elif [ "$STATE" = "FAILED" ] || [ "$STATE" = "CANCELLED" ] || [ "$STATE" = "TIMEOUT" ]; then
@@ -918,7 +1013,8 @@ REMOTE
             echo -e "Check logs: ${DIM}ssh conv 'cat ~/${job_name}-${JOBID}.err'${NC}"
             return
         elif [ -z "$STATE" ]; then
-            local sacct_state=$(ssh conv "sacct -j $JOBID --format=State -X --noheader 2>/dev/null | tr -d ' '" 2>/dev/null)
+            local sacct_state
+            sacct_state=$(ssh conv "sacct -j '$JOBID' --format=State -X --noheader 2>/dev/null | tr -d ' '" 2>/dev/null)
             if [ -n "$sacct_state" ] && [ "$sacct_state" != "PENDING" ] && [ "$sacct_state" != "RUNNING" ]; then
                 echo -e "${RED}Job ended (state: ${sacct_state:-unknown})${NC}"
                 echo -e "Check logs: ${DIM}ssh conv 'cat ~/${job_name}-${JOBID}.err'${NC}"
@@ -945,20 +1041,24 @@ submit_custom() {
 
     echo ""
     echo -e "${BOLD}Path to your script on the cluster?${NC}"
-    echo -e "  ${DIM}e.g. ~/train.sh${NC}"
+    echo -e "  ${DIM}e.g. ~/train.sh (letters, digits, ., _, ~, /, - only)${NC}"
     read -p "> " script_path
 
     if [ -z "$script_path" ]; then
         echo -e "${RED}No script provided.${NC}"
         return
     fi
+    if ! is_path "$script_path"; then
+        echo -e "${RED}Invalid path. Allowed characters: letters, digits, ., _, ~, /, -${NC}"
+        return
+    fi
 
     echo ""
     echo -e "${CYAN}Submitting ${script_path}: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
 
-    JOBID=$(ssh conv "sbatch --job-name=${job_name} --nodes=1 --gpus-per-node=${GPU_TYPE}:${num_gpus} --time=${wall} --mail-type=ALL --mail-user=__EMAIL__ --output=%x-%j.out --error=%x-%j.err ${script_path} 2>&1 | grep -oP 'Submitted batch job \K[0-9]+'")
+    JOBID=$(ssh conv "sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}' --mail-type=ALL --mail-user=__EMAIL__ --output=%x-%j.out --error=%x-%j.err '${script_path}' 2>&1 | grep -oP 'Submitted batch job \K[0-9]+'")
 
-    if [ -z "$JOBID" ]; then
+    if [ -z "$JOBID" ] || ! is_int "$JOBID"; then
         echo -e "${RED}Failed to submit job.${NC}"
         return
     fi
@@ -974,8 +1074,9 @@ connect_to_job() {
     local mode="${2:-1}"
     local job_name="${3:-gpu-session}"
 
-    local node=$(ssh conv "squeue -j $jobid -h -o '%N' 2>/dev/null" 2>/dev/null)
-    if [ -z "$node" ]; then
+    local node
+    node=$(ssh conv "squeue -j '$jobid' -h -o '%N' 2>/dev/null" 2>/dev/null)
+    if [ -z "$node" ] || ! is_name "$node"; then
         echo -e "${RED}Could not find node for job $jobid${NC}"
         return
     fi
@@ -984,7 +1085,7 @@ connect_to_job() {
 
     local url=""
     for i in $(seq 1 30); do
-        url=$(ssh conv "grep -o 'http://[^ ]*' ~/*-${jobid}.err 2>/dev/null | tail -1" 2>/dev/null)
+        url=$(ssh conv "grep -o 'http://[^ ]*' ~/*-'${jobid}'.err 2>/dev/null | tail -1" 2>/dev/null)
         if [ -n "$url" ]; then
             break
         fi
@@ -1027,7 +1128,7 @@ connect_to_job() {
         echo ""
         echo -e "${DIM}Tunnel active (port ${remote_port}). Ctrl+C to disconnect (job keeps running).${NC}"
         echo ""
-        ssh -N -J conv -L ${local_port}:localhost:${remote_port} ${node}.convergence.lip6.fr
+        ssh -N -J conv -L "${local_port}:localhost:${remote_port}" "${node}.convergence.lip6.fr"
     elif [ "$mode" = "1" ]; then
         echo -e "${CYAN}Opening Jupyter in browser...${NC}"
         if command -v xdg-open &>/dev/null; then
@@ -1037,13 +1138,14 @@ connect_to_job() {
         fi
         echo -e "${DIM}Tunnel active (port ${remote_port}). Ctrl+C to disconnect (job keeps running).${NC}"
         echo ""
-        ssh -N -J conv -L ${local_port}:localhost:${remote_port} ${node}.convergence.lip6.fr
+        ssh -N -J conv -L "${local_port}:localhost:${remote_port}" "${node}.convergence.lip6.fr"
     fi
 }
 
 my_jobs() {
     echo ""
-    local output=$(ssh conv "squeue -u ${CONV_USER} 2>/dev/null" 2>/dev/null)
+    local output
+    output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
     if echo "$output" | grep -q "${CONV_USER}"; then
         echo -e "${BOLD}Your jobs:${NC}"
         echo ""
@@ -1052,8 +1154,12 @@ my_jobs() {
         echo -e "${DIM}Detailed info on a job:${NC}"
         read -p "Job ID (or Enter to skip): " jobid
         if [ -n "$jobid" ]; then
+            if ! is_int "$jobid"; then
+                echo -e "${RED}Invalid job ID (must be a number).${NC}"
+                return
+            fi
             echo ""
-            ssh conv "sacct -j $jobid --format='JobID,JobName,NodeList,AllocTres%80,Start,End,State' -X 2>/dev/null" 2>/dev/null
+            ssh conv "sacct -j '$jobid' --format='JobID,JobName,NodeList,AllocTres%80,Start,End,State' -X 2>/dev/null" 2>/dev/null
         fi
     else
         echo -e "${DIM}No running jobs.${NC}"
@@ -1063,7 +1169,8 @@ my_jobs() {
 
 cancel_job() {
     echo ""
-    local output=$(ssh conv "squeue -u ${CONV_USER} 2>/dev/null" 2>/dev/null)
+    local output
+    output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
     if ! echo "$output" | grep -q "${CONV_USER}"; then
         echo -e "${DIM}No running jobs to cancel.${NC}"
         return
@@ -1075,11 +1182,13 @@ cancel_job() {
     echo -e "Enter a job ID, or ${BOLD}all${NC} to cancel everything."
     read -p "> " jobid
     if [ "$jobid" = "all" ]; then
-        ssh conv "scancel -u ${CONV_USER} 2>/dev/null" 2>/dev/null
+        ssh conv "scancel -u '${CONV_USER}' 2>/dev/null" 2>/dev/null
         echo -e "${GREEN}All jobs cancelled.${NC}"
-    elif [ -n "$jobid" ]; then
-        ssh conv "scancel $jobid 2>/dev/null" 2>/dev/null
+    elif is_int "$jobid"; then
+        ssh conv "scancel '$jobid' 2>/dev/null" 2>/dev/null
         echo -e "${GREEN}Job $jobid cancelled.${NC}"
+    elif [ -n "$jobid" ]; then
+        echo -e "${RED}Invalid job ID (must be a number, or 'all').${NC}"
     fi
 }
 
@@ -1093,7 +1202,8 @@ cluster_status() {
 
 connect_existing() {
     echo ""
-    local output=$(ssh conv "squeue -u ${CONV_USER} 2>/dev/null" 2>/dev/null)
+    local output
+    output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
     if ! echo "$output" | grep -q "${CONV_USER}"; then
         echo -e "${DIM}No running jobs to connect to.${NC}"
         return
@@ -1114,29 +1224,43 @@ connect_existing() {
         echo ""
         echo -e "Which job do you want to connect to?"
         read -p "> " jobid
-        job_name=$(ssh conv "squeue -j $jobid -h -o '%j' 2>/dev/null" 2>/dev/null)
+        if [ -n "$jobid" ]; then
+            job_name=$(ssh conv "squeue -j '$jobid' -h -o '%j' 2>/dev/null" 2>/dev/null)
+        fi
     fi
 
-    if [ -n "$jobid" ]; then
-        echo ""
-        echo -e "${BOLD}How do you want to connect?${NC}"
-        echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
-        echo -e "  ${GREEN}2${NC})  Terminal only"
-        echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
-        echo ""
-        read -p "> " mode
-        mode="${mode:-1}"
-        if [ "$mode" = "2" ]; then
-            local node=$(ssh conv "squeue -j $jobid -h -o '%N' 2>/dev/null" 2>/dev/null)
-            if [ -z "$node" ]; then
-                echo -e "${RED}Could not find node for job $jobid${NC}"
-                return
-            fi
-            echo -e "${CYAN}Connecting to $node...${NC}"
-            ssh -t -J conv ${node}.convergence.lip6.fr
-        else
-            connect_to_job "$jobid" "$mode" "${job_name:-gpu-session}"
+    if [ -z "$jobid" ]; then
+        return
+    fi
+    if ! is_int "$jobid"; then
+        echo -e "${RED}Invalid job ID (must be a number).${NC}"
+        return
+    fi
+
+    echo ""
+    echo -e "${BOLD}How do you want to connect?${NC}"
+    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
+    echo -e "  ${GREEN}2${NC})  Terminal only"
+    echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
+    echo ""
+    read -p "> " mode
+    mode="${mode:-1}"
+    if ! [[ "$mode" =~ ^[1-3]$ ]]; then
+        echo -e "${RED}Choose 1, 2, or 3.${NC}"
+        return
+    fi
+
+    if [ "$mode" = "2" ]; then
+        local node
+        node=$(ssh conv "squeue -j '$jobid' -h -o '%N' 2>/dev/null" 2>/dev/null)
+        if [ -z "$node" ] || ! is_name "$node"; then
+            echo -e "${RED}Could not find node for job $jobid${NC}"
+            return
         fi
+        echo -e "${CYAN}Connecting to $node...${NC}"
+        ssh -t -J conv "${node}.convergence.lip6.fr"
+    else
+        connect_to_job "$jobid" "$mode" "${job_name:-gpu-session}"
     fi
 }
 
@@ -1157,9 +1281,10 @@ while true; do
 done
 CONV_SCRIPT
 
-    # Replace placeholders
-    sed -i "s/__USERNAME__/${USERNAME}/g" "${INSTALL_DIR}/conv-manager"
-    sed -i "s/__EMAIL__/${EMAIL}/g" "${INSTALL_DIR}/conv-manager"
+    # Replace placeholders (use | delimiter to avoid issues with special chars)
+    ESCAPED_EMAIL=$(printf '%s\n' "$EMAIL" | sed 's/[&/\]/\\&/g')
+    sed -i "s|__USERNAME__|${USERNAME}|g" "${INSTALL_DIR}/conv-manager"
+    sed -i "s|__EMAIL__|${ESCAPED_EMAIL}|g" "${INSTALL_DIR}/conv-manager"
     chmod +x "${INSTALL_DIR}/conv-manager"
     echo -e "${GREEN}Installed:${NC} ~/conv-manager (alias: conv)"
 fi
@@ -1176,9 +1301,11 @@ setup_alias() {
     local cmd="$3"
 
     if [ -f "$file" ]; then
-        # Remove old alias if exists
-        grep -v "alias ${name}=" "$file" > "${file}.tmp" 2>/dev/null || true
-        mv "${file}.tmp" "$file"
+        # Remove old alias if exists (use mktemp for safe temp files)
+        local tmpfile
+        tmpfile=$(mktemp "${file}.XXXXXX")
+        grep -v "alias ${name}=" "$file" > "$tmpfile" 2>/dev/null || true
+        mv "$tmpfile" "$file"
     fi
     echo "alias ${name}=\"${cmd}\"" >> "$file"
 }
@@ -1190,13 +1317,17 @@ if [ "$SHELL_NAME" = "fish" ]; then
     SHELL_CONFIG="$HOME/.config/fish/config.fish"
     mkdir -p "$(dirname "$SHELL_CONFIG")"
     if $SETUP_HPC; then
-        grep -v 'alias hpc=' "$SHELL_CONFIG" > "${SHELL_CONFIG}.tmp" 2>/dev/null || true
-        mv "${SHELL_CONFIG}.tmp" "$SHELL_CONFIG" 2>/dev/null || true
+        local tmpfile
+        tmpfile=$(mktemp "${SHELL_CONFIG}.XXXXXX")
+        grep -v 'alias hpc=' "$SHELL_CONFIG" > "$tmpfile" 2>/dev/null || true
+        mv "$tmpfile" "$SHELL_CONFIG" 2>/dev/null || true
         echo 'alias hpc="~/hpc-notebook"' >> "$SHELL_CONFIG"
     fi
     if $SETUP_CONV; then
-        grep -v 'alias conv=' "$SHELL_CONFIG" > "${SHELL_CONFIG}.tmp" 2>/dev/null || true
-        mv "${SHELL_CONFIG}.tmp" "$SHELL_CONFIG" 2>/dev/null || true
+        local tmpfile
+        tmpfile=$(mktemp "${SHELL_CONFIG}.XXXXXX")
+        grep -v 'alias conv=' "$SHELL_CONFIG" > "$tmpfile" 2>/dev/null || true
+        mv "$tmpfile" "$SHELL_CONFIG" 2>/dev/null || true
         echo 'alias conv="~/conv-manager"' >> "$SHELL_CONFIG"
     fi
 elif [ "$SHELL_NAME" = "zsh" ]; then

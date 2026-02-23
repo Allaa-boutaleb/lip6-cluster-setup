@@ -12,8 +12,15 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# Default port for Convergence (9888 to avoid clash with HPC's 8888)
+CONV_USER="boutalebm"
 CONV_PORT=9888
+
+# ---- Input validation ----
+
+is_int()  { [[ "$1" =~ ^[0-9]+$ ]]; }
+is_wall() { [[ "$1" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; }
+is_name() { [[ "$1" =~ ^[a-zA-Z0-9_.-]+$ ]]; }
+is_path() { [[ "$1" =~ ^[a-zA-Z0-9_.~/-]+$ ]]; }
 
 welcome() {
     echo ""
@@ -54,12 +61,6 @@ pick_gpu() {
     esac
 }
 
-# Extract the actual port Jupyter chose from the log file
-parse_jupyter_port() {
-    local url="$1"
-    echo "$url" | grep -oP ':\K[0-9]+(?=/lab)' || echo "$url" | grep -oP ':\K[0-9]+(?=/\?token)' || echo "$CONV_PORT"
-}
-
 launch_session() {
     pick_gpu
 
@@ -68,18 +69,30 @@ launch_session() {
     echo -e "  ${DIM}Press Enter for 1 (max 4 per node for full, 8 for MIG)${NC}"
     read -p "> " num_gpus
     num_gpus="${num_gpus:-1}"
+    if ! is_int "$num_gpus"; then
+        echo -e "${RED}GPU count must be a number (e.g. 1, 2, 4).${NC}"
+        return
+    fi
 
     echo ""
     echo -e "${BOLD}How long do you need?${NC}"
     echo -e "  ${DIM}Press Enter for 8 hours (format: HH:MM:SS, max 15 days)${NC}"
     read -p "> " wall
     wall="${wall:-08:00:00}"
+    if ! is_wall "$wall"; then
+        echo -e "${RED}Invalid format. Use HH:MM:SS (e.g. 08:00:00).${NC}"
+        return
+    fi
 
     echo ""
     echo -e "${BOLD}Job name?${NC}"
-    echo -e "  ${DIM}Press Enter for 'gpu-session'${NC}"
+    echo -e "  ${DIM}Press Enter for 'gpu-session' (letters, digits, hyphens, underscores only)${NC}"
     read -p "> " job_name
     job_name="${job_name:-gpu-session}"
+    if ! is_name "$job_name"; then
+        echo -e "${RED}Invalid job name. Use only letters, digits, hyphens, underscores.${NC}"
+        return
+    fi
 
     echo ""
     echo -e "${BOLD}How do you want to work?${NC}"
@@ -90,6 +103,10 @@ launch_session() {
     echo ""
     read -p "> " mode
     mode="${mode:-1}"
+    if ! [[ "$mode" =~ ^[1-4]$ ]]; then
+        echo -e "${RED}Choose 1, 2, 3, or 4.${NC}"
+        return
+    fi
 
     if [ "$mode" = "4" ]; then
         submit_custom "$num_gpus" "$wall" "$job_name"
@@ -102,11 +119,10 @@ launch_session() {
         echo -e "${DIM}This is interactive — dies when you disconnect.${NC}"
         echo -e "${DIM}Use option 1 or 3 for persistent Jupyter sessions.${NC}"
         echo ""
-        ssh -t conv "salloc --job-name=${job_name} --nodes=1 --gpus-per-node=${GPU_TYPE}:${num_gpus} --time=${wall}"
+        ssh -t conv "salloc --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'"
         return
     fi
 
-    # Jupyter or Both — submit batch job (survives disconnect)
     echo ""
     echo -e "${CYAN}Submitting Jupyter Lab: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
 
@@ -138,7 +154,7 @@ sbatch ~/._conv_jupyter.sh 2>&1 | grep -oP 'Submitted batch job \K[0-9]+'
 REMOTE
     )
 
-    if [ -z "$JOBID" ]; then
+    if [ -z "$JOBID" ] || ! is_int "$JOBID"; then
         echo -e "${RED}Failed to submit job.${NC}"
         return
     fi
@@ -149,7 +165,7 @@ REMOTE
 
     local attempts=0
     while true; do
-        STATE=$(ssh conv "squeue -j $JOBID -h -o '%T' 2>/dev/null" 2>/dev/null)
+        STATE=$(ssh conv "squeue -j '$JOBID' -h -o '%T' 2>/dev/null" 2>/dev/null)
         if [ "$STATE" = "RUNNING" ]; then
             break
         elif [ "$STATE" = "FAILED" ] || [ "$STATE" = "CANCELLED" ] || [ "$STATE" = "TIMEOUT" ]; then
@@ -157,7 +173,8 @@ REMOTE
             echo -e "Check logs: ${DIM}ssh conv 'cat ~/${job_name}-${JOBID}.err'${NC}"
             return
         elif [ -z "$STATE" ]; then
-            local sacct_state=$(ssh conv "sacct -j $JOBID --format=State -X --noheader 2>/dev/null | tr -d ' '" 2>/dev/null)
+            local sacct_state
+            sacct_state=$(ssh conv "sacct -j '$JOBID' --format=State -X --noheader 2>/dev/null | tr -d ' '" 2>/dev/null)
             if [ -n "$sacct_state" ] && [ "$sacct_state" != "PENDING" ] && [ "$sacct_state" != "RUNNING" ]; then
                 echo -e "${RED}Job ended (state: ${sacct_state:-unknown})${NC}"
                 echo -e "Check logs: ${DIM}ssh conv 'cat ~/${job_name}-${JOBID}.err'${NC}"
@@ -184,20 +201,24 @@ submit_custom() {
 
     echo ""
     echo -e "${BOLD}Path to your script on the cluster?${NC}"
-    echo -e "  ${DIM}e.g. ~/train.sh${NC}"
+    echo -e "  ${DIM}e.g. ~/train.sh (letters, digits, ., _, ~, /, - only)${NC}"
     read -p "> " script_path
 
     if [ -z "$script_path" ]; then
         echo -e "${RED}No script provided.${NC}"
         return
     fi
+    if ! is_path "$script_path"; then
+        echo -e "${RED}Invalid path. Allowed characters: letters, digits, ., _, ~, /, -${NC}"
+        return
+    fi
 
     echo ""
     echo -e "${CYAN}Submitting ${script_path}: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
 
-    JOBID=$(ssh conv "sbatch --job-name=${job_name} --nodes=1 --gpus-per-node=${GPU_TYPE}:${num_gpus} --time=${wall} --mail-type=ALL --mail-user=allaa.boutaleb@lip6.fr --output=%x-%j.out --error=%x-%j.err ${script_path} 2>&1 | grep -oP 'Submitted batch job \K[0-9]+'")
+    JOBID=$(ssh conv "sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}' --mail-type=ALL --mail-user=allaa.boutaleb@lip6.fr --output=%x-%j.out --error=%x-%j.err '${script_path}' 2>&1 | grep -oP 'Submitted batch job \K[0-9]+'")
 
-    if [ -z "$JOBID" ]; then
+    if [ -z "$JOBID" ] || ! is_int "$JOBID"; then
         echo -e "${RED}Failed to submit job.${NC}"
         return
     fi
@@ -213,8 +234,9 @@ connect_to_job() {
     local mode="${2:-1}"
     local job_name="${3:-gpu-session}"
 
-    local node=$(ssh conv "squeue -j $jobid -h -o '%N' 2>/dev/null" 2>/dev/null)
-    if [ -z "$node" ]; then
+    local node
+    node=$(ssh conv "squeue -j '$jobid' -h -o '%N' 2>/dev/null" 2>/dev/null)
+    if [ -z "$node" ] || ! is_name "$node"; then
         echo -e "${RED}Could not find node for job $jobid${NC}"
         return
     fi
@@ -223,7 +245,7 @@ connect_to_job() {
 
     local url=""
     for i in $(seq 1 30); do
-        url=$(ssh conv "grep -o 'http://[^ ]*' ~/*-${jobid}.err 2>/dev/null | tail -1" 2>/dev/null)
+        url=$(ssh conv "grep -o 'http://[^ ]*' ~/*-'${jobid}'.err 2>/dev/null | tail -1" 2>/dev/null)
         if [ -n "$url" ]; then
             break
         fi
@@ -236,15 +258,16 @@ connect_to_job() {
         return
     fi
 
-    # Extract the actual port Jupyter is using (may differ from requested if port was busy)
-    local remote_port=$(echo "$url" | grep -oP ':\K[0-9]+(?=/)' | head -1)
+    local remote_port
+    remote_port=$(echo "$url" | grep -oP ':\K[0-9]+(?=/)' | head -1)
     remote_port="${remote_port:-$CONV_PORT}"
-
-    # Use the same port locally
+    if ! is_int "$remote_port"; then
+        echo -e "${RED}Could not determine Jupyter port.${NC}"
+        return
+    fi
     local local_port="$remote_port"
-
-    # Replace remote hostname with localhost in URL
-    local local_url=$(echo "$url" | sed "s|http://[^:]*:${remote_port}|http://localhost:${local_port}|")
+    local local_url
+    local_url=$(echo "$url" | sed "s|http://[^:]*:${remote_port}|http://localhost:${local_port}|")
 
     echo ""
     echo -e "${GREEN}================================================${NC}"
@@ -275,7 +298,7 @@ connect_to_job() {
         echo ""
         echo -e "${DIM}Tunnel active (port ${remote_port}). Ctrl+C to disconnect (job keeps running).${NC}"
         echo ""
-        ssh -N -J conv -L ${local_port}:localhost:${remote_port} ${node}.convergence.lip6.fr
+        ssh -N -J conv -L "${local_port}:localhost:${remote_port}" "${node}.convergence.lip6.fr"
     elif [ "$mode" = "1" ]; then
         echo -e "${CYAN}Opening Jupyter in browser...${NC}"
         if command -v xdg-open &>/dev/null; then
@@ -285,14 +308,15 @@ connect_to_job() {
         fi
         echo -e "${DIM}Tunnel active (port ${remote_port}). Ctrl+C to disconnect (job keeps running).${NC}"
         echo ""
-        ssh -N -J conv -L ${local_port}:localhost:${remote_port} ${node}.convergence.lip6.fr
+        ssh -N -J conv -L "${local_port}:localhost:${remote_port}" "${node}.convergence.lip6.fr"
     fi
 }
 
 my_jobs() {
     echo ""
-    local output=$(ssh conv "squeue -u boutalebm 2>/dev/null" 2>/dev/null)
-    if echo "$output" | grep -q "boutaleb"; then
+    local output
+    output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
+    if echo "$output" | grep -q "${CONV_USER}"; then
         echo -e "${BOLD}Your jobs:${NC}"
         echo ""
         echo "$output"
@@ -300,8 +324,12 @@ my_jobs() {
         echo -e "${DIM}Detailed info on a job:${NC}"
         read -p "Job ID (or Enter to skip): " jobid
         if [ -n "$jobid" ]; then
+            if ! is_int "$jobid"; then
+                echo -e "${RED}Invalid job ID (must be a number).${NC}"
+                return
+            fi
             echo ""
-            ssh conv "sacct -j $jobid --format='JobID,JobName,NodeList,AllocTres%80,Start,End,State' -X 2>/dev/null" 2>/dev/null
+            ssh conv "sacct -j '$jobid' --format='JobID,JobName,NodeList,AllocTres%80,Start,End,State' -X 2>/dev/null" 2>/dev/null
         fi
     else
         echo -e "${DIM}No running jobs.${NC}"
@@ -311,8 +339,9 @@ my_jobs() {
 
 cancel_job() {
     echo ""
-    local output=$(ssh conv "squeue -u boutalebm 2>/dev/null" 2>/dev/null)
-    if ! echo "$output" | grep -q "boutaleb"; then
+    local output
+    output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
+    if ! echo "$output" | grep -q "${CONV_USER}"; then
         echo -e "${DIM}No running jobs to cancel.${NC}"
         return
     fi
@@ -323,11 +352,13 @@ cancel_job() {
     echo -e "Enter a job ID, or ${BOLD}all${NC} to cancel everything."
     read -p "> " jobid
     if [ "$jobid" = "all" ]; then
-        ssh conv "scancel -u boutalebm 2>/dev/null" 2>/dev/null
+        ssh conv "scancel -u '${CONV_USER}' 2>/dev/null" 2>/dev/null
         echo -e "${GREEN}All jobs cancelled.${NC}"
-    elif [ -n "$jobid" ]; then
-        ssh conv "scancel $jobid 2>/dev/null" 2>/dev/null
+    elif is_int "$jobid"; then
+        ssh conv "scancel '$jobid' 2>/dev/null" 2>/dev/null
         echo -e "${GREEN}Job $jobid cancelled.${NC}"
+    elif [ -n "$jobid" ]; then
+        echo -e "${RED}Invalid job ID (must be a number, or 'all').${NC}"
     fi
 }
 
@@ -341,19 +372,20 @@ cluster_status() {
 
 connect_existing() {
     echo ""
-    local output=$(ssh conv "squeue -u boutalebm 2>/dev/null" 2>/dev/null)
-    if ! echo "$output" | grep -q "boutaleb"; then
+    local output
+    output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
+    if ! echo "$output" | grep -q "${CONV_USER}"; then
         echo -e "${DIM}No running jobs to connect to.${NC}"
         return
     fi
 
-    local job_ids=($(echo "$output" | awk '/boutaleb/{print $1}'))
+    local job_ids=($(echo "$output" | awk "/${CONV_USER}/{print \$1}"))
     local jobid=""
     local job_name=""
 
     if [ ${#job_ids[@]} -eq 1 ]; then
         jobid="${job_ids[0]}"
-        job_name=$(echo "$output" | awk '/boutaleb/{print $3}')
+        job_name=$(echo "$output" | awk "/${CONV_USER}/{print \$3}")
         echo -e "Auto-selecting your only running job: ${BOLD}$jobid${NC}"
     else
         echo -e "${BOLD}Your jobs:${NC}"
@@ -362,29 +394,43 @@ connect_existing() {
         echo ""
         echo -e "Which job do you want to connect to?"
         read -p "> " jobid
-        job_name=$(ssh conv "squeue -j $jobid -h -o '%j' 2>/dev/null" 2>/dev/null)
+        if [ -n "$jobid" ]; then
+            job_name=$(ssh conv "squeue -j '$jobid' -h -o '%j' 2>/dev/null" 2>/dev/null)
+        fi
     fi
 
-    if [ -n "$jobid" ]; then
-        echo ""
-        echo -e "${BOLD}How do you want to connect?${NC}"
-        echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
-        echo -e "  ${GREEN}2${NC})  Terminal only"
-        echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
-        echo ""
-        read -p "> " mode
-        mode="${mode:-1}"
-        if [ "$mode" = "2" ]; then
-            local node=$(ssh conv "squeue -j $jobid -h -o '%N' 2>/dev/null" 2>/dev/null)
-            if [ -z "$node" ]; then
-                echo -e "${RED}Could not find node for job $jobid${NC}"
-                return
-            fi
-            echo -e "${CYAN}Connecting to $node...${NC}"
-            ssh -t -J conv ${node}.convergence.lip6.fr
-        else
-            connect_to_job "$jobid" "$mode" "${job_name:-gpu-session}"
+    if [ -z "$jobid" ]; then
+        return
+    fi
+    if ! is_int "$jobid"; then
+        echo -e "${RED}Invalid job ID (must be a number).${NC}"
+        return
+    fi
+
+    echo ""
+    echo -e "${BOLD}How do you want to connect?${NC}"
+    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
+    echo -e "  ${GREEN}2${NC})  Terminal only"
+    echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
+    echo ""
+    read -p "> " mode
+    mode="${mode:-1}"
+    if ! [[ "$mode" =~ ^[1-3]$ ]]; then
+        echo -e "${RED}Choose 1, 2, or 3.${NC}"
+        return
+    fi
+
+    if [ "$mode" = "2" ]; then
+        local node
+        node=$(ssh conv "squeue -j '$jobid' -h -o '%N' 2>/dev/null" 2>/dev/null)
+        if [ -z "$node" ] || ! is_name "$node"; then
+            echo -e "${RED}Could not find node for job $jobid${NC}"
+            return
         fi
+        echo -e "${CYAN}Connecting to $node...${NC}"
+        ssh -t -J conv "${node}.convergence.lip6.fr"
+    else
+        connect_to_job "$jobid" "$mode" "${job_name:-gpu-session}"
     fi
 }
 

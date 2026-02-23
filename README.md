@@ -4,14 +4,18 @@ One-command setup for passwordless SSH access and interactive job management on 
 
 Supports both the **HPC cluster** (CPU, OAR scheduler) and the **Convergence cluster** (NVIDIA A100 GPUs, SLURM scheduler).
 
-## What it does
+## Getting started
 
-```
+```bash
 git clone https://github.com/Allaa-boutaleb/lip6-cluster-setup.git
-cd lip6-cluster-setup/
+cd lip6-cluster-setup
 chmod +x lip6-cluster-setup
 ./lip6-cluster-setup
 ```
+
+> **Windows users:** This script requires a Unix shell. Install [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (Windows Subsystem for Linux) and run the commands above from a WSL terminal (Ubuntu recommended).
+
+## What it does
 
 The setup wizard will:
 
@@ -109,14 +113,14 @@ conv-status     # Cluster GPU usage
 
 ## Requirements
 
-- macOS or Linux (local machine), or WSL on Windows.
-- `ssh`, `ssh-keygen`, `ssh-copy-id`
+- macOS, Linux, or Windows (via [WSL](https://learn.microsoft.com/en-us/windows/wsl/install))
+- `ssh`, `ssh-keygen`, `ssh-copy-id` (pre-installed on macOS/Linux/WSL)
 - A valid LIP6 account with cluster access
 - Your LIP6 secure password (wifi/workstation, **not** email password)
 
 ## Reset / Uninstall
 
-```
+```bash
 ./lip6-cluster-setup --reset
 ```
 
@@ -129,12 +133,26 @@ Two options:
 
 SSH keys are never deleted (they're safe to keep).
 
+## Security
+
+All user inputs (job IDs, core counts, walltimes, job names, script paths) are validated against strict patterns before being used in any command. This prevents command injection via SSH.
+
+- **Job IDs** — numeric only
+- **Core/GPU counts** — numeric only
+- **Walltimes** — `H:M:S` format only
+- **Job names** — alphanumeric, hyphens, underscores only
+- **Script paths** — letters, digits, `.`, `_`, `~`, `/`, `-` only
+- **SSH config** — uses `StrictHostKeyChecking accept-new` to detect host key changes
+- **SSH keys** — generated without passphrase for convenience (a warning is shown with instructions to add one)
+- **Existing SSH config** — preserved via `Include config.d/*` (not overwritten)
+- **Temp files** — created with `mktemp` to prevent race conditions
+
 ## Input validation
 
 The setup wizard validates all inputs with retry loops:
 
 - **Username** — lowercase letters, digits, underscores only
-- **Email** — must contain `@` and a domain
+- **Email** — letters, digits, dots, standard email characters only
 - **Menu choices** — must be a valid option number
 
 A confirmation summary is shown before any changes are made. Press Ctrl+C at any point to abort.
@@ -145,6 +163,7 @@ A confirmation summary is shown before any changes are made. Press Ctrl+C at any
 lip6-cluster-setup    # Main setup script (run this)
 hpc-notebook          # HPC manager (installed to ~/ by setup)
 conv-manager          # Convergence manager (installed to ~/ by setup)
+LICENSE               # MIT license
 ```
 
 ## Disclaimer
