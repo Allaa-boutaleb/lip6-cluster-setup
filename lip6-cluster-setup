@@ -1146,7 +1146,7 @@ my_jobs() {
     echo ""
     local output
     output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
-    if echo "$output" | grep -q "${CONV_USER}"; then
+    if ssh conv "squeue -h -u '${CONV_USER}' 2>/dev/null" 2>/dev/null | grep -q .; then
         echo -e "${BOLD}Your jobs:${NC}"
         echo ""
         echo "$output"
@@ -1171,7 +1171,7 @@ cancel_job() {
     echo ""
     local output
     output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
-    if ! echo "$output" | grep -q "${CONV_USER}"; then
+    if ! ssh conv "squeue -h -u '${CONV_USER}' 2>/dev/null" 2>/dev/null | grep -q .; then
         echo -e "${DIM}No running jobs to cancel.${NC}"
         return
     fi
@@ -1204,18 +1204,18 @@ connect_existing() {
     echo ""
     local output
     output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
-    if ! echo "$output" | grep -q "${CONV_USER}"; then
+    if ! ssh conv "squeue -h -u '${CONV_USER}' 2>/dev/null" 2>/dev/null | grep -q .; then
         echo -e "${DIM}No running jobs to connect to.${NC}"
         return
     fi
 
-    local job_ids=($(echo "$output" | awk "/${CONV_USER}/{print \$1}"))
+    local job_ids=($(ssh conv "squeue -h -u '${CONV_USER}' -o '%i' 2>/dev/null" 2>/dev/null))
     local jobid=""
     local job_name=""
 
     if [ ${#job_ids[@]} -eq 1 ]; then
         jobid="${job_ids[0]}"
-        job_name=$(echo "$output" | awk "/${CONV_USER}/{print \$3}")
+        job_name=$(ssh conv "squeue -h -j '${jobid}' -o '%j' 2>/dev/null" 2>/dev/null)
         echo -e "Auto-selecting your only running job: ${BOLD}$jobid${NC}"
     else
         echo -e "${BOLD}Your jobs:${NC}"
