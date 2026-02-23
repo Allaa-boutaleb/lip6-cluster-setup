@@ -524,7 +524,6 @@ if $SETUP_HPC; then
     cat > "${INSTALL_DIR}/hpc-notebook" << 'HPC_SCRIPT'
 #!/bin/bash
 # HPC Manager for LIP6 Cluster
-# __USERNAME__ - __EMAIL__
 
 BLUE='\033[1;34m'
 GREEN='\033[1;32m'
@@ -605,10 +604,15 @@ duration_human() {
 
 welcome() {
     echo ""
-    echo -e "${BLUE}================================================${NC}"
-    echo -e "${BOLD}         LIP6 HPC Cluster Manager${NC}"
-    echo -e "${DIM}    __USERNAME__ - __EMAIL__${NC}"
-    echo -e "${BLUE}================================================${NC}"
+    echo -e "${BLUE}"
+    echo '  ██╗  ██╗██████╗  ██████╗'
+    echo '  ██║  ██║██╔══██╗██╔════╝'
+    echo '  ███████║██████╔╝██║     '
+    echo '  ██╔══██║██╔═══╝ ██║     '
+    echo '  ██║  ██║██║     ╚██████╗'
+    echo '  ╚═╝  ╚═╝╚═╝      ╚═════╝'
+    echo -e "${NC}"
+    echo -e "  ${DIM}LIP6 Cluster · OAR · CPU${NC}"
 }
 
 show_menu() {
@@ -1096,7 +1100,6 @@ if $SETUP_CONV; then
     cat > "${INSTALL_DIR}/conv-manager" << 'CONV_SCRIPT'
 #!/bin/bash
 # Convergence GPU Cluster Manager for LIP6
-# __USERNAME__ - __EMAIL__
 
 BLUE='\033[1;34m'
 GREEN='\033[1;32m'
@@ -1207,12 +1210,15 @@ duration_to_minutes() {
 
 welcome() {
     echo ""
-    echo -e "${BLUE}================================================${NC}"
-    echo -e "${BOLD}     LIP6 Convergence GPU Cluster Manager${NC}"
-    echo -e "${DIM}    __USERNAME__ - __EMAIL__${NC}"
-    echo -e "${BLUE}================================================${NC}"
-    echo ""
-    echo -e "${DIM}  10 nodes | 40 x A100 80GB GPUs | SLURM${NC}"
+    echo -e "${CYAN}"
+    echo '   ██████╗ ██████╗ ███╗   ██╗██╗   ██╗'
+    echo '  ██╔════╝██╔═══██╗████╗  ██║██║   ██║'
+    echo '  ██║     ██║   ██║██╔██╗ ██║██║   ██║'
+    echo '  ██║     ██║   ██║██║╚██╗██║╚██╗ ██╔╝'
+    echo '  ╚██████╗╚██████╔╝██║ ╚████║ ╚████╔╝ '
+    echo '   ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝  ╚═══╝  '
+    echo -e "${NC}"
+    echo -e "  ${DIM}LIP6 Convergence · SLURM · A100 GPUs${NC}"
 }
 
 show_menu() {
