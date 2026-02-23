@@ -22,6 +22,11 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# ---- In-place status helpers ----
+
+status_line() { printf "\r\033[K%s" "$1"; }
+status_done() { printf "\r\033[K%s\n" "$1"; }
+
 # ---- Reset mode ----
 
 if [ "$1" = "--reset" ] || [ "$1" = "--uninstall" ]; then
@@ -38,12 +43,12 @@ if [ "$1" = "--reset" ] || [ "$1" = "--uninstall" ]; then
     echo -e "  ${GREEN}2${NC})  Full reset (local + remote)"
     echo -e "      ${DIM}Also restores .bashrc on HPC and Convergence from backup${NC}"
     echo ""
-    echo -e "  ${RED}q${NC})  Cancel"
+    echo -e "  ${CYAN}0${NC})  Cancel"
     echo ""
     read -p "> " reset_choice
 
     case $reset_choice in
-        q|Q) echo -e "\n${DIM}Cancelled.${NC}\n"; exit 0 ;;
+        0) echo -e "\n${DIM}Cancelled.${NC}\n"; exit 0 ;;
         1|2) ;;
         *) echo -e "${RED}Invalid choice.${NC}"; exit 1 ;;
     esac
@@ -55,38 +60,62 @@ if [ "$1" = "--reset" ] || [ "$1" = "--uninstall" ]; then
         echo -e "${DIM}This requires SSH access (done before removing local SSH config).${NC}"
         echo ""
 
-        # Try HPC
-        echo -n "  HPC:          "
-        if ssh -o ConnectTimeout=10 hpc "
+        hpc_ok=false
+        conv_ok=false
+
+        # Try HPC — single SSH call
+        status_line "  HPC:          ● Testing..."
+        hpc_result=$(ssh -o ConnectTimeout=10 hpc '
             if [ -f ~/.bashrc.pre-lip6-setup ]; then
                 cp ~/.bashrc.pre-lip6-setup ~/.bashrc
-                echo 'RESTORED'
+                echo "RESTORED"
             else
-                echo 'NO_BACKUP'
+                echo "NO_BACKUP"
             fi
-        " 2>/dev/null | grep -q "RESTORED"; then
-            echo -e "\r  HPC:          ${GREEN}Restored .bashrc from backup${NC}"
-        elif ssh -o ConnectTimeout=10 hpc "echo ok" 2>/dev/null | grep -q "ok"; then
-            echo -e "\r  HPC:          ${YELLOW}No backup found (.bashrc.pre-lip6-setup)${NC}"
+        ' 2>/dev/null) || hpc_result=""
+
+        if [ "$hpc_result" = "RESTORED" ]; then
+            status_done "  HPC:          $(echo -e "${GREEN}✓ Restored .bashrc from backup${NC}")"
+            hpc_ok=true
+        elif [ "$hpc_result" = "NO_BACKUP" ]; then
+            status_done "  HPC:          $(echo -e "${YELLOW}No backup found (.bashrc.pre-lip6-setup)${NC}")"
+            hpc_ok=true
         else
-            echo -e "\r  HPC:          ${DIM}Skipped (not configured or unreachable)${NC}"
+            status_done "  HPC:          $(echo -e "${DIM}✗ Skipped (not configured or unreachable)${NC}")"
         fi
 
-        # Try Convergence
-        echo -n "  Convergence:  "
-        if ssh -o ConnectTimeout=10 conv "
+        # Try Convergence — single SSH call
+        status_line "  Convergence:  ● Testing..."
+        conv_result=$(ssh -o ConnectTimeout=10 conv '
             if [ -f ~/.bashrc.pre-lip6-setup ]; then
                 cp ~/.bashrc.pre-lip6-setup ~/.bashrc
-                echo 'RESTORED'
+                echo "RESTORED"
             else
-                echo 'NO_BACKUP'
+                echo "NO_BACKUP"
             fi
-        " 2>/dev/null | grep -q "RESTORED"; then
-            echo -e "\r  Convergence:  ${GREEN}Restored .bashrc from backup${NC}"
-        elif ssh -o ConnectTimeout=10 conv "echo ok" 2>/dev/null | grep -q "ok"; then
-            echo -e "\r  Convergence:  ${YELLOW}No backup found (.bashrc.pre-lip6-setup)${NC}"
+        ' 2>/dev/null) || conv_result=""
+
+        if [ "$conv_result" = "RESTORED" ]; then
+            status_done "  Convergence:  $(echo -e "${GREEN}✓ Restored .bashrc from backup${NC}")"
+            conv_ok=true
+        elif [ "$conv_result" = "NO_BACKUP" ]; then
+            status_done "  Convergence:  $(echo -e "${YELLOW}No backup found (.bashrc.pre-lip6-setup)${NC}")"
+            conv_ok=true
         else
-            echo -e "\r  Convergence:  ${DIM}Skipped (not configured or unreachable)${NC}"
+            status_done "  Convergence:  $(echo -e "${DIM}✗ Skipped (not configured or unreachable)${NC}")"
+        fi
+
+        # If both unreachable, warn before destroying local config
+        if ! $hpc_ok && ! $conv_ok; then
+            echo ""
+            echo -e "${YELLOW}Both remote servers are unreachable.${NC}"
+            echo -e "${YELLOW}Continuing will destroy local SSH config without restoring remote .bashrc files.${NC}"
+            echo ""
+            read -p "Continue anyway? (y/N) " confirm
+            if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+                echo -e "\n${DIM}Cancelled.${NC}\n"
+                exit 0
+            fi
         fi
     fi
 
@@ -98,7 +127,7 @@ if [ "$1" = "--reset" ] || [ "$1" = "--uninstall" ]; then
     for f in ~/hpc-notebook ~/conv-manager; do
         if [ -f "$f" ]; then
             rm "$f"
-            echo -e "  ${GREEN}Removed${NC} $f"
+            echo -e "  ${GREEN}✓ Removed${NC} $f"
         else
             echo -e "  ${DIM}Already gone:${NC} $f"
         fi
@@ -107,13 +136,13 @@ if [ "$1" = "--reset" ] || [ "$1" = "--uninstall" ]; then
     # Remove LIP6 SSH config
     if [ -f ~/.ssh/config.d/lip6 ]; then
         rm ~/.ssh/config.d/lip6
-        echo -e "  ${GREEN}Removed${NC} ~/.ssh/config.d/lip6"
+        echo -e "  ${GREEN}✓ Removed${NC} ~/.ssh/config.d/lip6"
     fi
     # Restore main SSH config from backup (in case Include was added)
     LATEST_BACKUP=$(ls -t ~/.ssh/config.backup.* 2>/dev/null | head -1)
     if [ -n "$LATEST_BACKUP" ]; then
         cp "$LATEST_BACKUP" ~/.ssh/config
-        echo -e "  ${GREEN}Restored${NC} SSH config from backup (${LATEST_BACKUP})"
+        echo -e "  ${GREEN}✓ Restored${NC} SSH config from backup (${LATEST_BACKUP})"
     else
         echo -e "  ${DIM}No SSH config backup to restore.${NC}"
     fi
@@ -121,11 +150,10 @@ if [ "$1" = "--reset" ] || [ "$1" = "--uninstall" ]; then
     # Remove aliases from shell configs
     for rc in ~/.bashrc ~/.zshrc ~/.config/fish/config.fish; do
         if [ -f "$rc" ] && grep -q 'alias hpc=\|alias conv=' "$rc" 2>/dev/null; then
-            local tmpfile
             tmpfile=$(mktemp "${rc}.XXXXXX")
             grep -v 'alias hpc=' "$rc" | grep -v 'alias conv=' > "$tmpfile" 2>/dev/null || true
             mv "$tmpfile" "$rc"
-            echo -e "  ${GREEN}Cleaned${NC} aliases from $rc"
+            echo -e "  ${GREEN}✓ Cleaned${NC} aliases from $rc"
         fi
     done
 
@@ -317,12 +345,12 @@ echo ""
 
 SSH_KEY="$HOME/.ssh/id_ed25519"
 if [ -f "$SSH_KEY" ]; then
-    echo -e "${GREEN}SSH key already exists:${NC} $SSH_KEY"
+    status_done "  $(echo -e "${GREEN}✓${NC} SSH key exists: $SSH_KEY")"
 else
-    echo -e "Generating SSH key..."
+    status_line "  ● Generating SSH key..."
     mkdir -p ~/.ssh
     ssh-keygen -t ed25519 -C "$EMAIL" -f "$SSH_KEY" -N ""
-    echo -e "${GREEN}SSH key generated:${NC} $SSH_KEY"
+    status_done "  $(echo -e "${GREEN}✓${NC} SSH key generated: $SSH_KEY")"
     echo ""
     echo -e "${YELLOW}Note:${NC} The key was created without a passphrase for convenience."
     echo -e "${DIM}To add a passphrase later: ssh-keygen -p -f $SSH_KEY${NC}"
@@ -344,7 +372,6 @@ SSH_LIP6_CONFIG="$HOME/.ssh/config.d/lip6"
 # Backup existing config
 if [ -f "$SSH_CONFIG" ]; then
     cp "$SSH_CONFIG" "${SSH_CONFIG}.backup.$(date +%s)"
-    echo -e "${DIM}Backed up existing config to ${SSH_CONFIG}.backup.*${NC}"
 fi
 
 # Use Include-based approach to preserve existing SSH config entries
@@ -352,7 +379,6 @@ mkdir -p "$HOME/.ssh/config.d"
 if [ ! -f "$SSH_CONFIG" ] || ! grep -q 'Include config.d/\*' "$SSH_CONFIG" 2>/dev/null; then
     # Prepend Include directive (must be at top of config)
     if [ -f "$SSH_CONFIG" ]; then
-        local tmpfile
         tmpfile=$(mktemp "${SSH_CONFIG}.XXXXXX")
         echo "Include config.d/*" > "$tmpfile"
         echo "" >> "$tmpfile"
@@ -361,7 +387,6 @@ if [ ! -f "$SSH_CONFIG" ] || ! grep -q 'Include config.d/\*' "$SSH_CONFIG" 2>/de
     else
         echo "Include config.d/*" > "$SSH_CONFIG"
     fi
-    echo -e "${DIM}Added Include directive to ${SSH_CONFIG}${NC}"
 fi
 
 # Build LIP6-specific config in config.d/
@@ -375,6 +400,7 @@ fi
     echo "    HostName $GATEWAY"
     echo "    User $USERNAME"
     echo "    IdentityFile $SSH_KEY"
+    echo "    IdentitiesOnly yes"
     echo "    StrictHostKeyChecking accept-new"
     echo ""
 
@@ -384,6 +410,7 @@ fi
         echo "    User $USERNAME"
         echo "    ProxyJump lip6"
         echo "    IdentityFile $SSH_KEY"
+        echo "    IdentitiesOnly yes"
         echo "    ServerAliveInterval 60"
         echo "    ServerAliveCountMax 3"
         echo "    StrictHostKeyChecking accept-new"
@@ -396,6 +423,7 @@ fi
         echo "    User $USERNAME"
         echo "    ProxyJump lip6"
         echo "    IdentityFile $SSH_KEY"
+        echo "    IdentitiesOnly yes"
         echo "    ServerAliveInterval 60"
         echo "    ServerAliveCountMax 3"
         echo "    StrictHostKeyChecking accept-new"
@@ -404,6 +432,7 @@ fi
         echo "    User $USERNAME"
         echo "    ProxyJump conv"
         echo "    IdentityFile $SSH_KEY"
+        echo "    IdentitiesOnly yes"
         echo "    ServerAliveInterval 60"
         echo "    ServerAliveCountMax 3"
         echo "    StrictHostKeyChecking accept-new"
@@ -413,8 +442,7 @@ fi
 
 chmod 600 "$SSH_CONFIG"
 chmod 600 "$SSH_LIP6_CONFIG"
-echo -e "${GREEN}SSH config written to ${SSH_LIP6_CONFIG}${NC}"
-echo -e "${DIM}Your existing SSH config entries in ${SSH_CONFIG} are preserved.${NC}"
+status_done "  $(echo -e "${GREEN}✓${NC} SSH config written to ${SSH_LIP6_CONFIG}")"
 
 # ---- Copy SSH Keys ----
 
@@ -466,20 +494,20 @@ echo -e "${BOLD}Step 5: Testing connections${NC}"
 echo ""
 
 if $SETUP_HPC; then
-    echo -n "  HPC:          "
-    if ssh -o ConnectTimeout=10 hpc "echo ok" 2>/dev/null; then
-        echo -e "\r  HPC:          ${GREEN}Connected${NC}"
+    status_line "  HPC:          ● Testing..."
+    if ssh -o ConnectTimeout=10 hpc "echo ok" 2>/dev/null | grep -q ok; then
+        status_done "  HPC:          $(echo -e "${GREEN}✓ Connected${NC}")"
     else
-        echo -e "\r  HPC:          ${RED}Failed${NC}"
+        status_done "  HPC:          $(echo -e "${RED}✗ Failed${NC}")"
     fi
 fi
 
 if $SETUP_CONV; then
-    echo -n "  Convergence:  "
-    if ssh -o ConnectTimeout=10 conv "echo ok" 2>/dev/null; then
-        echo -e "\r  Convergence:  ${GREEN}Connected${NC}"
+    status_line "  Convergence:  ● Testing..."
+    if ssh -o ConnectTimeout=10 conv "echo ok" 2>/dev/null | grep -q ok; then
+        status_done "  Convergence:  $(echo -e "${GREEN}✓ Connected${NC}")"
     else
-        echo -e "\r  Convergence:  ${RED}Failed${NC}"
+        status_done "  Convergence:  $(echo -e "${RED}✗ Failed${NC}")"
     fi
 fi
 
@@ -497,7 +525,6 @@ if $SETUP_HPC; then
 #!/bin/bash
 # HPC Manager for LIP6 Cluster
 # __USERNAME__ - __EMAIL__
-set -e
 
 BLUE='\033[1;34m'
 GREEN='\033[1;32m'
@@ -511,8 +538,70 @@ NC='\033[0m'
 HPC_USER="__USERNAME__"
 
 is_int()  { [[ "$1" =~ ^[0-9]+$ ]]; }
-is_wall() { [[ "$1" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; }
 is_name() { [[ "$1" =~ ^[a-zA-Z0-9_.-]+$ ]]; }
+is_path() { [[ "$1" =~ ^[a-zA-Z0-9_.~/-]+$ ]]; }
+
+status_line() { printf "\r\033[K%s" "$1"; }
+status_done() { printf "\r\033[K%s\n" "$1"; }
+spin_chars=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+
+# parse_duration INPUT
+# Accepts: 30m, 8h, 3d, 3d 12h, 1d 6h 30m, H:M:S, bare number (hours)
+# Outputs OAR-compatible H:M:S to stdout. Returns 1 on invalid input.
+parse_duration() {
+    local input="${*,,}"  # lowercase
+    input=$(echo "$input" | xargs)  # trim
+    [ -z "$input" ] && return 1
+
+    # Legacy H:M:S format
+    if [[ "$input" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
+        echo "$input"
+        return 0
+    fi
+
+    local total_minutes=0
+    local matched=false
+
+    if [[ "$input" =~ [dhm] ]]; then
+        if [[ "$input" =~ ([0-9]+)d ]]; then
+            total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 1440 ))
+            matched=true
+        fi
+        if [[ "$input" =~ ([0-9]+)h ]]; then
+            total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 60 ))
+            matched=true
+        fi
+        if [[ "$input" =~ ([0-9]+)m ]]; then
+            total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} ))
+            matched=true
+        fi
+        if ! $matched; then return 1; fi
+    elif [[ "$input" =~ ^[0-9]+$ ]]; then
+        # Bare number = hours
+        total_minutes=$(( input * 60 ))
+    else
+        return 1
+    fi
+
+    local hours=$(( total_minutes / 60 ))
+    local mins=$(( total_minutes % 60 ))
+    echo "${hours}:${mins}:0"
+    return 0
+}
+
+# Convert total minutes to human-readable string
+duration_human() {
+    local total_minutes="$1"
+    [ -z "$total_minutes" ] || [ "$total_minutes" -le 0 ] 2>/dev/null && { echo "N/A"; return; }
+    local d=$(( total_minutes / 1440 ))
+    local h=$(( (total_minutes % 1440) / 60 ))
+    local m=$(( total_minutes % 60 ))
+    local result=""
+    [ $d -gt 0 ] && result="${d}d "
+    [ $h -gt 0 ] && result="${result}${h}h "
+    [ $m -gt 0 ] && result="${result}${m}m"
+    echo "${result:-0m}" | xargs
+}
 
 welcome() {
     echo ""
@@ -531,15 +620,16 @@ show_menu() {
     echo -e "  ${GREEN}3${NC})  View my jobs"
     echo -e "  ${GREEN}4${NC})  Cancel jobs"
     echo -e "  ${GREEN}5${NC})  SSH into login node"
-    echo -e "  ${RED}q${NC})  Quit"
+    echo -e "  ${CYAN}0${NC})  Exit"
     echo ""
 }
 
 launch_session() {
     echo ""
     echo -e "${BOLD}How many cores?${NC}"
-    echo -e "  ${DIM}Press Enter for 24${NC}"
+    echo -e "  ${DIM}Press Enter for 24, or 0 to go back${NC}"
     read -p "> " cores
+    [ "$cores" = "0" ] && return
     cores="${cores:-24}"
     if ! is_int "$cores"; then
         echo -e "${RED}Core count must be a number (e.g. 4, 12, 24).${NC}"
@@ -548,21 +638,35 @@ launch_session() {
 
     echo ""
     echo -e "${BOLD}How long do you need?${NC}"
-    echo -e "  ${DIM}Press Enter for 24 hours (format: H:M:S)${NC}"
-    read -p "> " wall
-    wall="${wall:-24:0:0}"
-    if ! is_wall "$wall"; then
-        echo -e "${RED}Invalid format. Use H:M:S (e.g. 8:0:0 or 24:0:0).${NC}"
+    echo -e "  ${DIM}e.g. 8h, 3d, 1d 6h 30m, 24:0:0 — Enter for 24h, 0 to go back${NC}"
+    read -p "> " wall_input
+    [ "$wall_input" = "0" ] && return
+    wall_input="${wall_input:-24h}"
+    wall=$(parse_duration "$wall_input")
+    if [ $? -ne 0 ] || [ -z "$wall" ]; then
+        echo -e "${RED}Invalid duration. Examples: 8h, 3d, 1d 6h 30m, 8:0:0${NC}"
         return
+    fi
+
+    # Duration warning
+    local wall_h=${wall%%:*}
+    if [ "$wall_h" -gt 24 ] 2>/dev/null; then
+        echo -e "${YELLOW}Note: Interactive sessions are typically limited to ~24h. Batch jobs can go up to 1000h.${NC}"
     fi
 
     echo ""
     echo -e "${BOLD}How do you want to work?${NC}"
-    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
-    echo -e "  ${GREEN}2${NC})  Terminal only (SSH into compute node)"
-    echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
+    echo ""
+    echo -e "  ${GREEN}1${NC})  Jupyter Lab + Terminal  ${DIM}(recommended)${NC}"
+    echo -e "      ${DIM}Persistent — survives disconnect. Opens browser + shows SSH command.${NC}"
+    echo -e "  ${GREEN}2${NC})  Terminal only  ${DIM}(interactive)${NC}"
+    echo -e "      ${DIM}Direct shell on compute node. Ends when you disconnect.${NC}"
+    echo -e "  ${GREEN}3${NC})  Submit a custom script"
+    echo -e "      ${DIM}Run your own batch script with OAR.${NC}"
+    echo -e "  ${CYAN}0${NC})  Back"
     echo ""
     read -p "> " mode
+    [ "$mode" = "0" ] && return
     mode="${mode:-1}"
     if ! [[ "$mode" =~ ^[1-3]$ ]]; then
         echo -e "${RED}Choose 1, 2, or 3.${NC}"
@@ -571,19 +675,37 @@ launch_session() {
 
     local port=8888
 
+    if [ "$mode" = "2" ]; then
+        echo ""
+        echo -e "${CYAN}Requesting interactive session: ${cores} cores, ${wall}...${NC}"
+        echo -e "${DIM}This is interactive — ends when you disconnect.${NC}"
+        echo ""
+        ssh -t hpc "oarsub -l /nodes=1/core=${cores},walltime=${wall} -p \"host like 'big%'\" -I"
+        return
+    fi
+
+    if [ "$mode" = "3" ]; then
+        submit_custom_hpc "$cores" "$wall"
+        return
+    fi
+
     echo ""
     echo -e "${CYAN}Submitting job: ${cores} cores, ${wall}...${NC}"
 
-    if [ "$mode" = "2" ]; then
-        echo ""
-        echo -e "${YELLOW}Terminal mode requires an interactive OAR session.${NC}"
-        echo -e "Opening SSH to the cluster..."
-        echo ""
-        echo -e "${DIM}Run this on the cluster:${NC}"
-        echo -e "  ${GREEN}oarsub -l /nodes=1/core=${cores},walltime=${wall} -p \"host like 'big%'\" -I${NC}"
-        echo ""
-        ssh hpc
-        return
+    # Check if Jupyter is available
+    status_line "  ● Checking Jupyter installation..."
+    jupyter_check=$(ssh hpc 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; which jupyter 2>/dev/null' 2>/dev/null)
+    if [ -z "$jupyter_check" ]; then
+        status_done "  $(echo -e "${YELLOW}! Jupyter not found. Installing...${NC}")"
+        ssh hpc 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; pip install --quiet jupyterlab' 2>/dev/null
+        if [ $? -eq 0 ]; then
+            echo -e "  ${GREEN}✓ Jupyter Lab installed${NC}"
+        else
+            echo -e "  ${RED}✗ Failed to install Jupyter. Check manually.${NC}"
+            return
+        fi
+    else
+        status_done "  $(echo -e "${GREEN}✓${NC} Jupyter available")"
     fi
 
     JOBID=$(ssh hpc bash -s "$cores" "$wall" "$port" << 'REMOTE'
@@ -592,7 +714,7 @@ WALL="$2"
 PORT="$3"
 cat > ~/._jupyter_job.sh << JOBSCRIPT
 #!/bin/bash
-#OAR -l {host like 'big1%'}/nodes=1/core=${CORES},walltime=${WALL}
+#OAR -l {host like 'big%'}/nodes=1/core=${CORES},walltime=${WALL}
 #OAR --notify mail:__EMAIL__
 
 source /etc/profile.d/modules.sh
@@ -615,33 +737,95 @@ REMOTE
     echo -e "${GREEN}Job $JOBID submitted.${NC} Waiting for it to start..."
     sleep 5
 
+    # Trap Ctrl+C during wait
+    local wait_interrupted=false
+    trap 'wait_interrupted=true' INT
+
     local attempts=0
+    local spin_idx=0
     while true; do
+        if $wait_interrupted; then
+            status_done ""
+            echo ""
+            echo -e "${YELLOW}Job $JOBID is still queued. You'll get an email when it starts.${NC}"
+            echo -e "Use option 2 to reconnect later."
+            trap - INT
+            return
+        fi
         STATE=$(ssh hpc "oarstat -f -j '$JOBID' 2>/dev/null | grep 'state =' | head -1 | awk -F= '{print \$2}' | tr -d ' '")
         if [ "$STATE" = "Running" ]; then
+            status_done "  $(echo -e "${GREEN}✓ Job $JOBID is running${NC}")"
             break
         elif [ "$STATE" = "Error" ] || [ "$STATE" = "Terminated" ]; then
+            status_done ""
             echo -e "${RED}Job failed (state: $STATE)${NC}"
             echo -e "Check logs: ${DIM}ssh hpc 'cat ~/OAR.${JOBID}.stderr'${NC}"
+            trap - INT
             return
         fi
         attempts=$((attempts + 1))
         if [ $attempts -gt 60 ]; then
-            echo -e "${YELLOW}Still queued after 5 min. Job $JOBID is waiting for resources.${NC}"
-            echo -e "Use option 2 to connect later, or option 4 to cancel."
+            status_done ""
+            echo ""
+            echo -e "${YELLOW}Job $JOBID is still queued after 5 min. You'll get an email when it starts.${NC}"
+            echo -e "Use option 2 to reconnect later."
+            trap - INT
             return
         fi
-        echo -e "  ${DIM}${STATE:-Queued}... ($((attempts * 5))s)${NC}"
+        local sc="${spin_chars[$((spin_idx % ${#spin_chars[@]}))]}"
+        spin_idx=$((spin_idx + 1))
+        status_line "  ${sc} ${STATE:-PENDING} — waiting for resources ($((attempts * 5))s) — Ctrl+C to stop waiting"
         sleep 5
     done
 
-    connect_to_job "$JOBID" "$port" "$mode"
+    trap - INT
+    connect_to_job "$JOBID" "$port"
+}
+
+submit_custom_hpc() {
+    local cores="$1"
+    local wall="$2"
+
+    echo ""
+    echo -e "${BOLD}Path to your script on the cluster?${NC}"
+    echo -e "  ${DIM}e.g. ~/train.sh — 0 to go back${NC}"
+    read -p "> " script_path
+    [ "$script_path" = "0" ] && return
+
+    if [ -z "$script_path" ]; then
+        echo -e "${RED}No script provided.${NC}"
+        return
+    fi
+    if ! is_path "$script_path"; then
+        echo -e "${RED}Invalid path. Allowed characters: letters, digits, ., _, ~, /, -${NC}"
+        return
+    fi
+
+    # Warn if > 1000h
+    local wall_h=${wall%%:*}
+    if [ "$wall_h" -gt 1000 ] 2>/dev/null; then
+        echo -e "${YELLOW}Warning: ${wall_h}h exceeds the typical 1000h batch limit.${NC}"
+    fi
+
+    echo ""
+    echo -e "${CYAN}Submitting ${script_path}: ${cores} cores, ${wall}...${NC}"
+
+    JOBID=$(ssh hpc "oarsub -l /nodes=1/core=${cores},walltime=${wall} -p \"host like 'big%'\" -S '${script_path}' 2>&1 | grep -oP 'OAR_JOB_ID=\K[0-9]+'")
+
+    if [ -z "$JOBID" ] || ! is_int "$JOBID"; then
+        echo -e "${RED}Failed to submit job.${NC}"
+        return
+    fi
+
+    echo -e "${GREEN}Job $JOBID submitted!${NC}"
+    echo -e "  Check status:  ${DIM}option 3${NC}"
+    echo -e "  Check logs:    ${DIM}ssh hpc 'cat ~/OAR.${JOBID}.stderr'${NC}"
+    echo -e "  Cancel:        ${DIM}option 4${NC}"
 }
 
 connect_to_job() {
     local jobid="$1"
     local port="${2:-8888}"
-    local mode="${3:-1}"
 
     local node
     node=$(ssh hpc "oarstat -f -j '$jobid' 2>/dev/null | grep 'assigned_hostnames' | awk '{print \$3}'")
@@ -653,15 +837,21 @@ connect_to_job() {
     echo -e "${CYAN}Running on ${BOLD}$node${NC}${CYAN}. Waiting for Jupyter...${NC}"
 
     local url=""
+    local spin_idx=0
     for i in $(seq 1 30); do
         url=$(ssh hpc "grep -o 'http://[^ ]*' ~/OAR.'${jobid}'.stderr 2>/dev/null | tail -1")
         if [ -n "$url" ]; then
+            status_done "  $(echo -e "${GREEN}✓${NC} Jupyter is ready")"
             break
         fi
+        local sc="${spin_chars[$((spin_idx % ${#spin_chars[@]}))]}"
+        spin_idx=$((spin_idx + 1))
+        status_line "  ${sc} Waiting for Jupyter to start... ($((i * 2))s)"
         sleep 2
     done
 
     if [ -z "$url" ]; then
+        status_done ""
         echo -e "${RED}Jupyter didn't start.${NC}"
         echo -e "Check logs: ${DIM}ssh hpc 'cat ~/OAR.${jobid}.stderr'${NC}"
         return
@@ -682,49 +872,110 @@ connect_to_job() {
     echo -e "  ${BOLD}Node:${NC}  $node"
     echo -e "  ${BOLD}URL:${NC}   ${CYAN}$local_url${NC}"
     echo ""
-
-    if [ "$mode" = "3" ]; then
-        echo -e "${CYAN}Opening Jupyter in browser...${NC}"
-        if command -v xdg-open &>/dev/null; then
-            xdg-open "$local_url" 2>/dev/null &
-        elif command -v open &>/dev/null; then
-            open "$local_url" &
-        fi
-        echo ""
-        echo -e "${BOLD}To open a terminal on $node, run in another tab:${NC}"
-        echo ""
-        echo -e "  ${GREEN}ssh -t hpc \"OAR_JOB_ID=$jobid oarsh $node\"${NC}"
-        echo ""
-        echo -e "${DIM}Or with Kitty:${NC}"
-        echo ""
-        echo -e "  ${GREEN}kitty +kitten ssh -t hpc \"OAR_JOB_ID=$jobid oarsh $node\"${NC}"
-        echo ""
-        echo -e "${DIM}Tunnel active. Ctrl+C to disconnect (job keeps running).${NC}"
-        echo ""
-        ssh -N -L "${actual_port}:${node}:${actual_port}" hpc
-    elif [ "$mode" = "1" ]; then
-        echo -e "${CYAN}Opening Jupyter in browser...${NC}"
-        if command -v xdg-open &>/dev/null; then
-            xdg-open "$local_url" 2>/dev/null &
-        elif command -v open &>/dev/null; then
-            open "$local_url" &
-        fi
-        echo -e "${DIM}Tunnel active. Ctrl+C to disconnect (job keeps running).${NC}"
-        echo ""
-        ssh -N -L "${actual_port}:${node}:${actual_port}" hpc
+    echo -e "${CYAN}Opening Jupyter in browser...${NC}"
+    if command -v xdg-open &>/dev/null; then
+        xdg-open "$local_url" 2>/dev/null &
+    elif command -v open &>/dev/null; then
+        open "$local_url" &
     fi
+    echo ""
+    echo -e "${BOLD}To open a terminal on $node, run in another tab:${NC}"
+    echo ""
+    echo -e "  ${GREEN}ssh -t hpc \"OAR_JOB_ID=$jobid oarsh $node\"${NC}"
+    echo ""
+    echo -e "${DIM}Tunnel active. Ctrl+C to disconnect (job keeps running).${NC}"
+    echo ""
+    ssh -N -L "${actual_port}:${node}:${actual_port}" hpc
 }
 
 my_jobs() {
     echo ""
-    local output
-    output=$(ssh hpc "oarstat -u ${HPC_USER} 2>/dev/null")
-    if echo "$output" | grep -q "^[0-9]"; then
-        echo -e "${BOLD}Your jobs:${NC}"
+    status_line "  ● Fetching jobs..."
+    local raw
+    raw=$(ssh hpc "oarstat -u ${HPC_USER} -f 2>/dev/null" 2>/dev/null)
+    if [ -z "$raw" ] || ! echo "$raw" | grep -q "Job_Id"; then
+        status_done "  $(echo -e "${DIM}No jobs found.${NC}")"
         echo ""
-        echo "$output"
-    else
-        echo -e "${DIM}No running jobs.${NC}"
+        return
+    fi
+
+    status_done ""
+
+    # Parse oarstat -f output
+    local current_id="" current_name="" current_state="" current_wall="" current_start="" current_node=""
+    local running_lines=()
+    local pending_lines=()
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ Job_Id[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
+            # Save previous job
+            if [ -n "$current_id" ]; then
+                if [ "$current_state" = "Running" ]; then
+                    running_lines+=("${current_id}|${current_name}|${current_node}|${current_wall}|${current_start}")
+                elif [ -n "$current_state" ]; then
+                    pending_lines+=("${current_id}|${current_name}|${current_wall}")
+                fi
+            fi
+            current_id="${BASH_REMATCH[1]}"
+            current_name="" current_state="" current_wall="" current_start="" current_node=""
+        fi
+        [[ "$line" =~ name[[:space:]]*=[[:space:]]*(.*) ]] && current_name="${BASH_REMATCH[1]}" && current_name=$(echo "$current_name" | xargs)
+        [[ "$line" =~ state[[:space:]]*=[[:space:]]*(.*) ]] && current_state="${BASH_REMATCH[1]}" && current_state=$(echo "$current_state" | xargs)
+        [[ "$line" =~ walltime[[:space:]]*=[[:space:]]*(.*) ]] && current_wall="${BASH_REMATCH[1]}" && current_wall=$(echo "$current_wall" | xargs)
+        [[ "$line" =~ startTime[[:space:]]*=[[:space:]]*(.*) ]] && current_start="${BASH_REMATCH[1]}" && current_start=$(echo "$current_start" | xargs)
+        [[ "$line" =~ assigned_hostnames[[:space:]]*=[[:space:]]*(.*) ]] && current_node="${BASH_REMATCH[1]}" && current_node=$(echo "$current_node" | xargs)
+    done <<< "$raw"
+
+    # Don't forget the last job
+    if [ -n "$current_id" ]; then
+        if [ "$current_state" = "Running" ]; then
+            running_lines+=("${current_id}|${current_name}|${current_node}|${current_wall}|${current_start}")
+        elif [ -n "$current_state" ]; then
+            pending_lines+=("${current_id}|${current_name}|${current_wall}")
+        fi
+    fi
+
+    if [ ${#running_lines[@]} -gt 0 ]; then
+        echo -e "${GREEN}${BOLD}RUNNING${NC}"
+        printf "  %-10s %-15s %-10s %-12s %-12s\n" "ID" "Name" "Node" "Elapsed" "Remaining"
+        echo -e "  ${DIM}──────────────────────────────────────────────────────────────${NC}"
+        for entry in "${running_lines[@]}"; do
+            IFS='|' read -r jid jname jnode jwall jstart <<< "$entry"
+            # Compute elapsed and remaining
+            local start_ts elapsed_str remain_str
+            if [[ "$jstart" =~ ^[0-9]+$ ]]; then
+                start_ts="$jstart"
+            else
+                start_ts=$(date -d "$jstart" +%s 2>/dev/null)
+            fi
+            if [ -n "$start_ts" ] && [ "$start_ts" -gt 0 ] 2>/dev/null; then
+                local now_ts=$(date +%s)
+                local elapsed_min=$(( (now_ts - start_ts) / 60 ))
+                # Parse walltime H:M:S to minutes
+                local wh wm ws
+                IFS=':' read -r wh wm ws <<< "$jwall"
+                local wall_min=$(( wh * 60 + wm ))
+                local remain_min=$(( wall_min - elapsed_min ))
+                [ $remain_min -lt 0 ] && remain_min=0
+                elapsed_str=$(duration_human $elapsed_min)
+                remain_str=$(duration_human $remain_min)
+            else
+                elapsed_str="N/A"
+                remain_str="N/A"
+            fi
+            printf "  %-10s %-15s %-10s %-12s %-12s\n" "$jid" "${jname:0:15}" "${jnode:0:10}" "$elapsed_str" "$remain_str"
+        done
+    fi
+
+    if [ ${#pending_lines[@]} -gt 0 ]; then
+        [ ${#running_lines[@]} -gt 0 ] && echo ""
+        echo -e "${YELLOW}${BOLD}PENDING${NC}"
+        printf "  %-10s %-15s %-15s\n" "ID" "Name" "Requested Time"
+        echo -e "  ${DIM}──────────────────────────────────────────${NC}"
+        for entry in "${pending_lines[@]}"; do
+            IFS='|' read -r jid jname jwall <<< "$entry"
+            printf "  %-10s %-15s %-15s\n" "$jid" "${jname:0:15}" "$jwall"
+        done
     fi
     echo ""
 }
@@ -741,8 +992,9 @@ cancel_job() {
     echo ""
     echo "$output"
     echo ""
-    echo -e "Enter a job ID, or ${BOLD}all${NC} to cancel everything."
+    echo -e "Enter a job ID, ${BOLD}all${NC} to cancel everything, or ${CYAN}0${NC} to go back."
     read -p "> " jobid
+    [ "$jobid" = "0" ] && return
     if [ "$jobid" = "all" ]; then
         ssh hpc "for jid in \$(oarstat -u ${HPC_USER} 2>/dev/null | awk '/^[0-9]/{print \$1}'); do oardel \$jid; echo \"Cancelled \$jid\"; done"
         echo -e "${GREEN}Done.${NC}"
@@ -774,8 +1026,9 @@ connect_existing() {
         echo ""
         echo "$output"
         echo ""
-        echo -e "Which job do you want to connect to?"
+        echo -e "Which job? (or ${CYAN}0${NC} to go back)"
         read -p "> " jobid
+        [ "$jobid" = "0" ] && return
     fi
 
     if [ -z "$jobid" ]; then
@@ -788,14 +1041,15 @@ connect_existing() {
 
     echo ""
     echo -e "${BOLD}How do you want to connect?${NC}"
-    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
+    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser + shows SSH command)"
     echo -e "  ${GREEN}2${NC})  Terminal only"
-    echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
+    echo -e "  ${CYAN}0${NC})  Back"
     echo ""
     read -p "> " mode
+    [ "$mode" = "0" ] && return
     mode="${mode:-1}"
-    if ! [[ "$mode" =~ ^[1-3]$ ]]; then
-        echo -e "${RED}Choose 1, 2, or 3.${NC}"
+    if ! [[ "$mode" =~ ^[1-2]$ ]]; then
+        echo -e "${RED}Choose 1 or 2.${NC}"
         return
     fi
 
@@ -809,7 +1063,7 @@ connect_existing() {
         echo -e "${CYAN}Connecting to $node...${NC}"
         ssh -t hpc "OAR_JOB_ID='$jobid' oarsh '$node'"
     else
-        connect_to_job "$jobid" 8888 "$mode"
+        connect_to_job "$jobid" 8888
     fi
 }
 
@@ -823,7 +1077,7 @@ while true; do
         3) my_jobs ;;
         4) cancel_job ;;
         5) ssh hpc ;;
-        q|Q) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
+        0) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
         *) echo -e "${RED}Invalid choice.${NC}" ;;
     esac
 done
@@ -843,7 +1097,6 @@ if $SETUP_CONV; then
 #!/bin/bash
 # Convergence GPU Cluster Manager for LIP6
 # __USERNAME__ - __EMAIL__
-set -e
 
 BLUE='\033[1;34m'
 GREEN='\033[1;32m'
@@ -858,9 +1111,99 @@ CONV_USER="__USERNAME__"
 CONV_PORT=9888
 
 is_int()  { [[ "$1" =~ ^[0-9]+$ ]]; }
-is_wall() { [[ "$1" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; }
 is_name() { [[ "$1" =~ ^[a-zA-Z0-9_.-]+$ ]]; }
 is_path() { [[ "$1" =~ ^[a-zA-Z0-9_.~/-]+$ ]]; }
+
+status_line() { printf "\r\033[K%s" "$1"; }
+status_done() { printf "\r\033[K%s\n" "$1"; }
+spin_chars=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+
+# parse_duration INPUT
+# Accepts: 30m, 8h, 3d, 3d 12h, 1d 6h 30m, HH:MM:SS, bare number (hours)
+# Outputs SLURM-compatible time (HH:MM:SS or D-HH:MM:SS) to stdout.
+parse_duration() {
+    local input="${*,,}"  # lowercase
+    input=$(echo "$input" | xargs)  # trim
+    [ -z "$input" ] && return 1
+
+    # Legacy H:M:S / HH:MM:SS format
+    if [[ "$input" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
+        local h m s
+        IFS=':' read -r h m s <<< "$input"
+        if [ "$h" -ge 24 ]; then
+            local d=$(( h / 24 ))
+            local rem_h=$(( h % 24 ))
+            printf "%d-%02d:%02d:%02d\n" "$d" "$rem_h" "$m" "$s"
+        else
+            printf "%02d:%02d:%02d\n" "$h" "$m" "$s"
+        fi
+        return 0
+    fi
+
+    local total_minutes=0
+    local matched=false
+
+    if [[ "$input" =~ [dhm] ]]; then
+        if [[ "$input" =~ ([0-9]+)d ]]; then
+            total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 1440 ))
+            matched=true
+        fi
+        if [[ "$input" =~ ([0-9]+)h ]]; then
+            total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 60 ))
+            matched=true
+        fi
+        if [[ "$input" =~ ([0-9]+)m ]]; then
+            total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} ))
+            matched=true
+        fi
+        if ! $matched; then return 1; fi
+    elif [[ "$input" =~ ^[0-9]+$ ]]; then
+        # Bare number = hours
+        total_minutes=$(( input * 60 ))
+    else
+        return 1
+    fi
+
+    local total_h=$(( total_minutes / 60 ))
+    local total_m=$(( total_minutes % 60 ))
+    if [ "$total_h" -ge 24 ]; then
+        local d=$(( total_h / 24 ))
+        local rem_h=$(( total_h % 24 ))
+        printf "%d-%02d:%02d:00\n" "$d" "$rem_h" "$total_m"
+    else
+        printf "%02d:%02d:00\n" "$total_h" "$total_m"
+    fi
+    return 0
+}
+
+# Total minutes from raw duration input (for limit checks)
+duration_to_minutes() {
+    local input="${*,,}"
+    input=$(echo "$input" | xargs)
+    [ -z "$input" ] && echo "0" && return
+
+    if [[ "$input" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
+        local h m s
+        IFS=':' read -r h m s <<< "$input"
+        echo $(( h * 60 + m ))
+        return
+    fi
+
+    local total_minutes=0
+    if [[ "$input" =~ ([0-9]+)d ]]; then
+        total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 1440 ))
+    fi
+    if [[ "$input" =~ ([0-9]+)h ]]; then
+        total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 60 ))
+    fi
+    if [[ "$input" =~ ([0-9]+)m ]]; then
+        total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} ))
+    fi
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        total_minutes=$(( input * 60 ))
+    fi
+    echo "$total_minutes"
+}
 
 welcome() {
     echo ""
@@ -882,7 +1225,7 @@ show_menu() {
     echo -e "  ${GREEN}4${NC})  Cancel jobs"
     echo -e "  ${GREEN}5${NC})  Cluster status (GPUs, nodes)"
     echo -e "  ${GREEN}6${NC})  SSH into login node"
-    echo -e "  ${RED}q${NC})  Quit"
+    echo -e "  ${CYAN}0${NC})  Exit"
     echo ""
 }
 
@@ -892,22 +1235,26 @@ pick_gpu() {
     echo ""
     echo -e "  ${GREEN}1${NC})  A100 80GB full     ${DIM}(node01-06, best for large models)${NC}"
     echo -e "  ${GREEN}2${NC})  A100 40GB MIG       ${DIM}(node07-10, good for smaller jobs)${NC}"
+    echo -e "  ${CYAN}0${NC})  Back"
     echo ""
     read -p "> " gpu_choice
     case $gpu_choice in
+        0) return 1 ;;
         1) GPU_TYPE="a100_7g.80gb" ;;
         2) GPU_TYPE="a100_3g.40gb" ;;
         *) GPU_TYPE="a100_7g.80gb" ;;
     esac
+    return 0
 }
 
 launch_session() {
-    pick_gpu
+    pick_gpu || return
 
     echo ""
     echo -e "${BOLD}How many GPUs?${NC}"
-    echo -e "  ${DIM}Press Enter for 1 (max 4 per node for full, 8 for MIG)${NC}"
+    echo -e "  ${DIM}Press Enter for 1 (max 4 per node for full, 8 for MIG), 0 to go back${NC}"
     read -p "> " num_gpus
+    [ "$num_gpus" = "0" ] && return
     num_gpus="${num_gpus:-1}"
     if ! is_int "$num_gpus"; then
         echo -e "${RED}GPU count must be a number (e.g. 1, 2, 4).${NC}"
@@ -916,18 +1263,27 @@ launch_session() {
 
     echo ""
     echo -e "${BOLD}How long do you need?${NC}"
-    echo -e "  ${DIM}Press Enter for 8 hours (format: HH:MM:SS, max 15 days)${NC}"
-    read -p "> " wall
-    wall="${wall:-08:00:00}"
-    if ! is_wall "$wall"; then
-        echo -e "${RED}Invalid format. Use HH:MM:SS (e.g. 08:00:00).${NC}"
+    echo -e "  ${DIM}e.g. 8h, 3d, 1d 6h 30m, 08:00:00 — Enter for 8h, 0 to go back${NC}"
+    read -p "> " wall_input
+    [ "$wall_input" = "0" ] && return
+    wall_input="${wall_input:-8h}"
+    wall=$(parse_duration "$wall_input")
+    if [ $? -ne 0 ] || [ -z "$wall" ]; then
+        echo -e "${RED}Invalid duration. Examples: 8h, 3d, 1d 6h 30m, 08:00:00${NC}"
         return
+    fi
+
+    # Warn if > 15 days
+    local total_min=$(duration_to_minutes "$wall_input")
+    if [ "$total_min" -gt 21600 ] 2>/dev/null; then
+        echo -e "${YELLOW}Warning: Duration exceeds the 15-day maximum for Convergence.${NC}"
     fi
 
     echo ""
     echo -e "${BOLD}Job name?${NC}"
-    echo -e "  ${DIM}Press Enter for 'gpu-session' (letters, digits, hyphens, underscores only)${NC}"
+    echo -e "  ${DIM}Press Enter for 'gpu-session', 0 to go back${NC}"
     read -p "> " job_name
+    [ "$job_name" = "0" ] && return
     job_name="${job_name:-gpu-session}"
     if ! is_name "$job_name"; then
         echo -e "${RED}Invalid job name. Use only letters, digits, hyphens, underscores.${NC}"
@@ -936,19 +1292,24 @@ launch_session() {
 
     echo ""
     echo -e "${BOLD}How do you want to work?${NC}"
-    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
-    echo -e "  ${GREEN}2${NC})  Terminal only (SSH into compute node)"
-    echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
-    echo -e "  ${GREEN}4${NC})  Submit a custom script"
+    echo ""
+    echo -e "  ${GREEN}1${NC})  Jupyter Lab + Terminal  ${DIM}(recommended)${NC}"
+    echo -e "      ${DIM}Persistent — survives disconnect. Opens browser + shows SSH command.${NC}"
+    echo -e "  ${GREEN}2${NC})  Terminal only  ${DIM}(interactive)${NC}"
+    echo -e "      ${DIM}Direct shell on compute node. Ends when you disconnect.${NC}"
+    echo -e "  ${GREEN}3${NC})  Submit a custom script"
+    echo -e "      ${DIM}Run your own batch script with SLURM.${NC}"
+    echo -e "  ${CYAN}0${NC})  Back"
     echo ""
     read -p "> " mode
+    [ "$mode" = "0" ] && return
     mode="${mode:-1}"
-    if ! [[ "$mode" =~ ^[1-4]$ ]]; then
-        echo -e "${RED}Choose 1, 2, 3, or 4.${NC}"
+    if ! [[ "$mode" =~ ^[1-3]$ ]]; then
+        echo -e "${RED}Choose 1, 2, or 3.${NC}"
         return
     fi
 
-    if [ "$mode" = "4" ]; then
+    if [ "$mode" = "3" ]; then
         submit_custom "$num_gpus" "$wall" "$job_name"
         return
     fi
@@ -956,8 +1317,7 @@ launch_session() {
     if [ "$mode" = "2" ]; then
         echo ""
         echo -e "${CYAN}Requesting interactive session: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
-        echo -e "${DIM}This is interactive — dies when you disconnect.${NC}"
-        echo -e "${DIM}Use option 1 or 3 for persistent Jupyter sessions.${NC}"
+        echo -e "${DIM}This is interactive — ends when you disconnect.${NC}"
         echo ""
         ssh -t conv "salloc --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'"
         return
@@ -965,6 +1325,22 @@ launch_session() {
 
     echo ""
     echo -e "${CYAN}Submitting Jupyter Lab: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
+
+    # Check if Jupyter is available
+    status_line "  ● Checking Jupyter installation..."
+    jupyter_check=$(ssh conv 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; which jupyter 2>/dev/null' 2>/dev/null)
+    if [ -z "$jupyter_check" ]; then
+        status_done "  $(echo -e "${YELLOW}! Jupyter not found. Installing...${NC}")"
+        ssh conv 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; pip install --quiet jupyterlab' 2>/dev/null
+        if [ $? -eq 0 ]; then
+            echo -e "  ${GREEN}✓ Jupyter Lab installed${NC}"
+        else
+            echo -e "  ${RED}✗ Failed to install Jupyter. Check manually.${NC}"
+            return
+        fi
+    else
+        status_done "  $(echo -e "${GREEN}✓${NC} Jupyter available")"
+    fi
 
     JOBID=$(ssh conv bash -s "$num_gpus" "$GPU_TYPE" "$wall" "$CONV_PORT" "$job_name" << 'REMOTE'
 NUM_GPUS="$1"
@@ -1003,34 +1379,58 @@ REMOTE
     echo -e "${DIM}(Convergence queue can take minutes to hours depending on load)${NC}"
     sleep 5
 
+    # Trap Ctrl+C during wait
+    local wait_interrupted=false
+    trap 'wait_interrupted=true' INT
+
     local attempts=0
+    local spin_idx=0
     while true; do
+        if $wait_interrupted; then
+            status_done ""
+            echo ""
+            echo -e "${YELLOW}Job $JOBID is still queued. You'll get an email when it starts.${NC}"
+            echo -e "Use option 2 to reconnect later."
+            trap - INT
+            return
+        fi
         STATE=$(ssh conv "squeue -j '$JOBID' -h -o '%T' 2>/dev/null" 2>/dev/null)
         if [ "$STATE" = "RUNNING" ]; then
+            status_done "  $(echo -e "${GREEN}✓ Job $JOBID is running${NC}")"
             break
         elif [ "$STATE" = "FAILED" ] || [ "$STATE" = "CANCELLED" ] || [ "$STATE" = "TIMEOUT" ]; then
+            status_done ""
             echo -e "${RED}Job failed (state: $STATE)${NC}"
             echo -e "Check logs: ${DIM}ssh conv 'cat ~/${job_name}-${JOBID}.err'${NC}"
+            trap - INT
             return
         elif [ -z "$STATE" ]; then
             local sacct_state
             sacct_state=$(ssh conv "sacct -j '$JOBID' --format=State -X --noheader 2>/dev/null | tr -d ' '" 2>/dev/null)
             if [ -n "$sacct_state" ] && [ "$sacct_state" != "PENDING" ] && [ "$sacct_state" != "RUNNING" ]; then
+                status_done ""
                 echo -e "${RED}Job ended (state: ${sacct_state:-unknown})${NC}"
                 echo -e "Check logs: ${DIM}ssh conv 'cat ~/${job_name}-${JOBID}.err'${NC}"
+                trap - INT
                 return
             fi
         fi
         attempts=$((attempts + 1))
         if [ $attempts -gt 120 ]; then
-            echo -e "${YELLOW}Still queued after 10 min. Job $JOBID is waiting for GPUs.${NC}"
-            echo -e "Use option 2 to connect later, or option 4 to cancel."
+            status_done ""
+            echo ""
+            echo -e "${YELLOW}Job $JOBID is still queued after 10 min. You'll get an email when it starts.${NC}"
+            echo -e "Use option 2 to reconnect later."
+            trap - INT
             return
         fi
-        echo -e "  ${DIM}${STATE:-PENDING}... ($((attempts * 5))s)${NC}"
+        local sc="${spin_chars[$((spin_idx % ${#spin_chars[@]}))]}"
+        spin_idx=$((spin_idx + 1))
+        status_line "  ${sc} ${STATE:-PENDING} — waiting for GPUs ($((attempts * 5))s) — Ctrl+C to stop waiting"
         sleep 5
     done
 
+    trap - INT
     connect_to_job "$JOBID" "$mode" "$job_name"
 }
 
@@ -1041,8 +1441,9 @@ submit_custom() {
 
     echo ""
     echo -e "${BOLD}Path to your script on the cluster?${NC}"
-    echo -e "  ${DIM}e.g. ~/train.sh (letters, digits, ., _, ~, /, - only)${NC}"
+    echo -e "  ${DIM}e.g. ~/train.sh — 0 to go back${NC}"
     read -p "> " script_path
+    [ "$script_path" = "0" ] && return
 
     if [ -z "$script_path" ]; then
         echo -e "${RED}No script provided.${NC}"
@@ -1084,15 +1485,21 @@ connect_to_job() {
     echo -e "${CYAN}Running on ${BOLD}$node${NC}${CYAN}. Waiting for Jupyter...${NC}"
 
     local url=""
+    local spin_idx=0
     for i in $(seq 1 30); do
         url=$(ssh conv "grep -o 'http://[^ ]*' ~/*-'${jobid}'.err 2>/dev/null | tail -1" 2>/dev/null)
         if [ -n "$url" ]; then
+            status_done "  $(echo -e "${GREEN}✓${NC} Jupyter is ready")"
             break
         fi
+        local sc="${spin_chars[$((spin_idx % ${#spin_chars[@]}))]}"
+        spin_idx=$((spin_idx + 1))
+        status_line "  ${sc} Waiting for Jupyter to start... ($((i * 2))s)"
         sleep 2
     done
 
     if [ -z "$url" ]; then
+        status_done ""
         echo -e "${RED}Jupyter didn't start.${NC}"
         echo -e "Check logs: ${DIM}ssh conv 'cat ~/*-${jobid}.err'${NC}"
         return
@@ -1113,56 +1520,52 @@ connect_to_job() {
     echo -e "  ${BOLD}Port:${NC}   $remote_port"
     echo -e "  ${BOLD}URL:${NC}    ${CYAN}$local_url${NC}"
     echo ""
-
-    if [ "$mode" = "3" ]; then
-        echo -e "${CYAN}Opening Jupyter in browser...${NC}"
-        if command -v xdg-open &>/dev/null; then
-            xdg-open "$local_url" 2>/dev/null &
-        elif command -v open &>/dev/null; then
-            open "$local_url" &
-        fi
-        echo ""
-        echo -e "${BOLD}To open a terminal on $node, run in another tab:${NC}"
-        echo ""
-        echo -e "  ${GREEN}ssh -t -J conv ${node}.convergence.lip6.fr${NC}"
-        echo ""
-        echo -e "${DIM}Tunnel active (port ${remote_port}). Ctrl+C to disconnect (job keeps running).${NC}"
-        echo ""
-        ssh -N -J conv -L "${local_port}:localhost:${remote_port}" "${node}.convergence.lip6.fr"
-    elif [ "$mode" = "1" ]; then
-        echo -e "${CYAN}Opening Jupyter in browser...${NC}"
-        if command -v xdg-open &>/dev/null; then
-            xdg-open "$local_url" 2>/dev/null &
-        elif command -v open &>/dev/null; then
-            open "$local_url" &
-        fi
-        echo -e "${DIM}Tunnel active (port ${remote_port}). Ctrl+C to disconnect (job keeps running).${NC}"
-        echo ""
-        ssh -N -J conv -L "${local_port}:localhost:${remote_port}" "${node}.convergence.lip6.fr"
+    echo -e "${CYAN}Opening Jupyter in browser...${NC}"
+    if command -v xdg-open &>/dev/null; then
+        xdg-open "$local_url" 2>/dev/null &
+    elif command -v open &>/dev/null; then
+        open "$local_url" &
     fi
+    echo ""
+    echo -e "${BOLD}To open a terminal on $node, run in another tab:${NC}"
+    echo ""
+    echo -e "  ${GREEN}ssh -t -J conv ${node}.convergence.lip6.fr${NC}"
+    echo ""
+    echo -e "${DIM}Tunnel active (port ${remote_port}). Ctrl+C to disconnect (job keeps running).${NC}"
+    echo ""
+    ssh -N -J conv -L "${local_port}:localhost:${remote_port}" "${node}.convergence.lip6.fr"
 }
 
 my_jobs() {
     echo ""
-    local output
-    output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
-    if ssh conv "squeue -h -u '${CONV_USER}' 2>/dev/null" 2>/dev/null | grep -q .; then
-        echo -e "${BOLD}Your jobs:${NC}"
+    status_line "  ● Fetching jobs..."
+    if ! ssh conv "squeue -h -u '${CONV_USER}' 2>/dev/null" 2>/dev/null | grep -q .; then
+        status_done "  $(echo -e "${DIM}No jobs found.${NC}")"
         echo ""
-        echo "$output"
-        echo ""
-        echo -e "${DIM}Detailed info on a job:${NC}"
-        read -p "Job ID (or Enter to skip): " jobid
-        if [ -n "$jobid" ]; then
-            if ! is_int "$jobid"; then
-                echo -e "${RED}Invalid job ID (must be a number).${NC}"
-                return
-            fi
-            echo ""
-            ssh conv "sacct -j '$jobid' --format='JobID,JobName,NodeList,AllocTres%80,Start,End,State' -X 2>/dev/null" 2>/dev/null
-        fi
-    else
-        echo -e "${DIM}No running jobs.${NC}"
+        return
+    fi
+
+    status_done ""
+
+    # Fetch running and pending separately with rich formatting
+    local running
+    running=$(ssh conv "squeue -h -u '${CONV_USER}' -t RUNNING -o '  %-8i %-20j %-12M %-12l %-12L %-15R' 2>/dev/null" 2>/dev/null)
+    local pending
+    pending=$(ssh conv "squeue -h -u '${CONV_USER}' -t PENDING -o '  %-8i %-20j %-12l %-20R' 2>/dev/null" 2>/dev/null)
+
+    if [ -n "$running" ]; then
+        echo -e "${GREEN}${BOLD}RUNNING${NC}"
+        printf "  %-8s %-20s %-12s %-12s %-12s %-15s\n" "JobID" "Name" "Elapsed" "TimeLimit" "TimeLeft" "Node"
+        echo -e "  ${DIM}────────────────────────────────────────────────────────────────────────────────${NC}"
+        echo "$running"
+    fi
+
+    if [ -n "$pending" ]; then
+        [ -n "$running" ] && echo ""
+        echo -e "${YELLOW}${BOLD}PENDING${NC}"
+        printf "  %-8s %-20s %-12s %-20s\n" "JobID" "Name" "TimeLimit" "Reason"
+        echo -e "  ${DIM}──────────────────────────────────────────────────────────────${NC}"
+        echo "$pending"
     fi
     echo ""
 }
@@ -1179,8 +1582,9 @@ cancel_job() {
     echo ""
     echo "$output"
     echo ""
-    echo -e "Enter a job ID, or ${BOLD}all${NC} to cancel everything."
+    echo -e "Enter a job ID, ${BOLD}all${NC} to cancel everything, or ${CYAN}0${NC} to go back."
     read -p "> " jobid
+    [ "$jobid" = "0" ] && return
     if [ "$jobid" = "all" ]; then
         ssh conv "scancel -u '${CONV_USER}' 2>/dev/null" 2>/dev/null
         echo -e "${GREEN}All jobs cancelled.${NC}"
@@ -1222,8 +1626,9 @@ connect_existing() {
         echo ""
         echo "$output"
         echo ""
-        echo -e "Which job do you want to connect to?"
+        echo -e "Which job? (or ${CYAN}0${NC} to go back)"
         read -p "> " jobid
+        [ "$jobid" = "0" ] && return
         if [ -n "$jobid" ]; then
             job_name=$(ssh conv "squeue -j '$jobid' -h -o '%j' 2>/dev/null" 2>/dev/null)
         fi
@@ -1239,14 +1644,15 @@ connect_existing() {
 
     echo ""
     echo -e "${BOLD}How do you want to connect?${NC}"
-    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
+    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser + shows SSH command)"
     echo -e "  ${GREEN}2${NC})  Terminal only"
-    echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
+    echo -e "  ${CYAN}0${NC})  Back"
     echo ""
     read -p "> " mode
+    [ "$mode" = "0" ] && return
     mode="${mode:-1}"
-    if ! [[ "$mode" =~ ^[1-3]$ ]]; then
-        echo -e "${RED}Choose 1, 2, or 3.${NC}"
+    if ! [[ "$mode" =~ ^[1-2]$ ]]; then
+        echo -e "${RED}Choose 1 or 2.${NC}"
         return
     fi
 
@@ -1275,7 +1681,7 @@ while true; do
         4) cancel_job ;;
         5) cluster_status ;;
         6) ssh conv ;;
-        q|Q) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
+        0) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
         *) echo -e "${RED}Invalid choice.${NC}" ;;
     esac
 done
@@ -1317,14 +1723,12 @@ if [ "$SHELL_NAME" = "fish" ]; then
     SHELL_CONFIG="$HOME/.config/fish/config.fish"
     mkdir -p "$(dirname "$SHELL_CONFIG")"
     if $SETUP_HPC; then
-        local tmpfile
         tmpfile=$(mktemp "${SHELL_CONFIG}.XXXXXX")
         grep -v 'alias hpc=' "$SHELL_CONFIG" > "$tmpfile" 2>/dev/null || true
         mv "$tmpfile" "$SHELL_CONFIG" 2>/dev/null || true
         echo 'alias hpc="~/hpc-notebook"' >> "$SHELL_CONFIG"
     fi
     if $SETUP_CONV; then
-        local tmpfile
         tmpfile=$(mktemp "${SHELL_CONFIG}.XXXXXX")
         grep -v 'alias conv=' "$SHELL_CONFIG" > "$tmpfile" 2>/dev/null || true
         mv "$tmpfile" "$SHELL_CONFIG" 2>/dev/null || true

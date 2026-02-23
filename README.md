@@ -20,7 +20,7 @@ chmod +x lip6-cluster-setup
 The setup wizard will:
 
 1. **Generate an SSH key** (ed25519) if you don't have one
-2. **Configure passwordless SSH** through the LIP6 gateway with ProxyJump
+2. **Configure passwordless SSH** through the LIP6 gateway with ProxyJump and `IdentitiesOnly yes`
 3. **Copy keys** to all servers (gateway, HPC, Convergence, compute nodes)
 4. **Install manager scripts** (`hpc` and `conv`) on your local machine
 5. **Add aliases** to your shell (bash, zsh, or fish)
@@ -35,13 +35,14 @@ After setup, you get two interactive managers:
 
 ## Manager features
 
-Both managers provide an interactive menu to:
+Both managers provide an interactive menu with **0) Back/Exit** navigation at every level:
 
-- **Launch sessions** — Jupyter Lab, terminal, or both
+- **Launch sessions** — Jupyter Lab + Terminal (recommended), Terminal only, or custom script
 - **Reconnect** to running sessions (auto-selects if only one job)
-- **View jobs** and cluster status
+- **View jobs** with time tracking (elapsed, remaining, grouped by state)
 - **Cancel jobs** (individual or all)
 - **SSH tunnel** setup for Jupyter with automatic browser opening
+- **Jupyter auto-install** — checks if Jupyter is available before submitting, installs if missing
 
 ### HPC Manager (`hpc`)
 
@@ -58,13 +59,13 @@ What do you want to do?
   3)  View my jobs
   4)  Cancel jobs
   5)  SSH into login node
-  q)  Quit
+  0)  Exit
 ```
 
 Work modes:
-- **Jupyter Lab** — submits batch job, waits, tunnels, opens browser
-- **Terminal only** — interactive OAR session
-- **Both** — Jupyter + terminal command for a second tab
+- **Jupyter Lab + Terminal** (recommended) — submits batch job, waits with spinner, tunnels, opens browser, shows SSH command for terminal access
+- **Terminal only** — runs `oarsub -I` directly for an interactive shell on a compute node
+- **Submit a custom script** — runs your own OAR batch script with `oarsub -S`
 
 ### Convergence Manager (`conv`)
 
@@ -84,7 +85,7 @@ What do you want to do?
   4)  Cancel jobs
   5)  Cluster status (GPUs, nodes)
   6)  SSH into login node
-  q)  Quit
+  0)  Exit
 ```
 
 Additional features:
@@ -92,6 +93,49 @@ Additional features:
 - **Multi-GPU** support (up to 4 per node)
 - **Custom script submission** with GPU allocation
 - **Automatic port detection** from Jupyter logs (handles port conflicts)
+
+### Friendly duration input
+
+Both managers accept natural duration formats instead of requiring `H:M:S`:
+
+| Input | Meaning |
+|-------|---------|
+| `30m` | 30 minutes |
+| `8h` | 8 hours |
+| `3d` | 3 days |
+| `3d 12h` | 3 days 12 hours |
+| `1d 6h 30m` | 1 day 6 hours 30 minutes |
+| `8:0:0` | 8 hours (legacy H:M:S) |
+| `24` | 24 hours (bare number) |
+
+Warnings are shown when exceeding typical limits (24h interactive for HPC, 1000h batch for HPC, 15 days for Convergence).
+
+### Enhanced job listings
+
+Jobs are grouped by state with time tracking:
+
+**HPC** — parses `oarstat -f` to compute elapsed and remaining time:
+```
+RUNNING
+  ID         Name            Node       Elapsed      Remaining
+  ──────────────────────────────────────────────────────────────
+  1234       jupyter         big12      2h 15m       5h 45m
+
+PENDING
+  ID         Name            Requested Time
+  ──────────────────────────────────────────
+  1235       training        24:0:0
+```
+
+**Convergence** — uses rich `squeue` format with TimeUsed, TimeLimit, TimeLeft fields.
+
+### In-place status updates
+
+The setup wizard and both managers use in-place terminal updates instead of scrolling output:
+
+- Setup steps show `● Working...` → `✓ Done` on a single line
+- Pending job loops show a spinner: `⠹ PENDING — waiting for resources (45s) — Ctrl+C to stop waiting`
+- Press **Ctrl+C** while waiting to stop — a message explains you'll get an email when the job starts and can reconnect later
 
 ## Remote aliases
 
@@ -131,6 +175,8 @@ Two options:
 | **Local only** | `~/hpc-notebook`, `~/conv-manager`, SSH config (restored from backup), shell aliases |
 | **Full reset** | Everything above + restores `.bashrc` on HPC and Convergence from pre-setup backup |
 
+The reset uses a single SSH call per server (instead of multiple). If both remote servers are unreachable, you'll be warned before local config is removed.
+
 SSH keys are never deleted (they're safe to keep).
 
 ## Security
@@ -139,10 +185,10 @@ All user inputs (job IDs, core counts, walltimes, job names, script paths) are v
 
 - **Job IDs** — numeric only
 - **Core/GPU counts** — numeric only
-- **Walltimes** — `H:M:S` format only
+- **Durations** — parsed through `parse_duration()` which only accepts known formats
 - **Job names** — alphanumeric, hyphens, underscores only
 - **Script paths** — letters, digits, `.`, `_`, `~`, `/`, `-` only
-- **SSH config** — uses `StrictHostKeyChecking accept-new` to detect host key changes
+- **SSH config** — uses `StrictHostKeyChecking accept-new` and `IdentitiesOnly yes` to prevent host key attacks and extra key auth failures
 - **SSH keys** — generated without passphrase for convenience (a warning is shown with instructions to add one)
 - **Existing SSH config** — preserved via `Include config.d/*` (not overwritten)
 - **Temp files** — created with `mktemp` to prevent race conditions
