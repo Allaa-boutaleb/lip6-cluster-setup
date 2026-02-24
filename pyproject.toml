@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lip6tui"
+version = "2.0.0"
+description = "Interactive TUI managers for LIP6 HPC and Convergence clusters"
+requires-python = ">=3.8"
+license = "MIT"
+dependencies = ["textual>=1.0.0"]
+
+[project.scripts]
+lip6-hpc = "lip6tui.hpc.app:main"
+lip6-conv = "lip6tui.conv.app:main"
+
+[tool.setuptools.packages.find]
+include = ["lip6tui*"]
+
+[tool.setuptools.package-data]
+"lip6tui.hpc" = ["*.tcss"]
+"lip6tui.conv" = ["*.tcss"]

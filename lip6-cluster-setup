@@ -38,7 +38,7 @@ if [ "$1" = "--reset" ] || [ "$1" = "--uninstall" ]; then
     echo -e "${BOLD}What do you want to reset?${NC}"
     echo ""
     echo -e "  ${GREEN}1${NC})  Local only"
-    echo -e "      ${DIM}Removes ~/hpc-notebook, ~/conv-manager, SSH config, local aliases${NC}"
+    echo -e "      ${DIM}Removes TUI package, config, legacy scripts, SSH config, local aliases${NC}"
     echo ""
     echo -e "  ${GREEN}2${NC})  Full reset (local + remote)"
     echo -e "      ${DIM}Also restores .bashrc on HPC and Convergence from backup${NC}"
@@ -123,7 +123,21 @@ if [ "$1" = "--reset" ] || [ "$1" = "--uninstall" ]; then
     echo -e "${CYAN}Resetting local setup...${NC}"
     echo ""
 
-    # Remove local scripts
+    # Uninstall Python TUI package
+    if pip show lip6tui &>/dev/null 2>&1; then
+        pip uninstall -y lip6tui 2>/dev/null
+        echo -e "  ${GREEN}✓ Uninstalled${NC} lip6tui Python package"
+    else
+        echo -e "  ${DIM}lip6tui package not installed${NC}"
+    fi
+
+    # Remove config directory
+    if [ -d ~/.lip6 ]; then
+        rm -rf ~/.lip6
+        echo -e "  ${GREEN}✓ Removed${NC} ~/.lip6/"
+    fi
+
+    # Remove legacy local scripts
     for f in ~/hpc-notebook ~/conv-manager; do
         if [ -f "$f" ]; then
             rm "$f"
@@ -402,6 +416,9 @@ fi
     echo "    IdentityFile $SSH_KEY"
     echo "    IdentitiesOnly yes"
     echo "    StrictHostKeyChecking accept-new"
+    echo "    ControlMaster auto"
+    echo "    ControlPath ~/.ssh/sockets/%r@%h-%p"
+    echo "    ControlPersist 60"
     echo ""
 
     if $SETUP_HPC; then
@@ -414,6 +431,9 @@ fi
         echo "    ServerAliveInterval 60"
         echo "    ServerAliveCountMax 3"
         echo "    StrictHostKeyChecking accept-new"
+        echo "    ControlMaster auto"
+        echo "    ControlPath ~/.ssh/sockets/%r@%h-%p"
+        echo "    ControlPersist 60"
         echo ""
     fi
 
@@ -427,6 +447,9 @@ fi
         echo "    ServerAliveInterval 60"
         echo "    ServerAliveCountMax 3"
         echo "    StrictHostKeyChecking accept-new"
+        echo "    ControlMaster auto"
+        echo "    ControlPath ~/.ssh/sockets/%r@%h-%p"
+        echo "    ControlPersist 60"
         echo ""
         echo "Host *.convergence.lip6.fr"
         echo "    User $USERNAME"
@@ -442,6 +465,7 @@ fi
 
 chmod 600 "$SSH_CONFIG"
 chmod 600 "$SSH_LIP6_CONFIG"
+mkdir -p "$HOME/.ssh/sockets"
 status_done "  $(echo -e "${GREEN}✓${NC} SSH config written to ${SSH_LIP6_CONFIG}")"
 
 # ---- Copy SSH Keys ----
@@ -517,6 +541,79 @@ echo ""
 echo -e "${BOLD}Step 6: Installing cluster manager tools${NC}"
 echo ""
 
+# Check Python 3.8+
+status_line "  ● Checking Python..."
+PYTHON_CMD=""
+for cmd in python3 python; do
+    if command -v "$cmd" &>/dev/null; then
+        py_version=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+        py_major=$("$cmd" -c "import sys; print(sys.version_info.major)" 2>/dev/null)
+        py_minor=$("$cmd" -c "import sys; print(sys.version_info.minor)" 2>/dev/null)
+        if [ "$py_major" -ge 3 ] 2>/dev/null && [ "$py_minor" -ge 8 ] 2>/dev/null; then
+            PYTHON_CMD="$cmd"
+            break
+        fi
+    fi
+done
+
+if [ -z "$PYTHON_CMD" ]; then
+    status_done "  $(echo -e "${RED}✗ Python 3.8+ not found${NC}")"
+    echo -e "${YELLOW}Please install Python 3.8+ and re-run this script.${NC}"
+    echo -e "${DIM}On Ubuntu/Debian: sudo apt install python3 python3-pip${NC}"
+    echo -e "${DIM}On macOS: brew install python3${NC}"
+    exit 1
+fi
+status_done "  $(echo -e "${GREEN}✓${NC} Python ${py_version} found (${PYTHON_CMD})")"
+
+# Install TUI package
+status_line "  ● Installing lip6tui package..."
+PIP_CMD="$PYTHON_CMD -m pip"
+if ! $PIP_CMD install --user "$SCRIPT_DIR" 2>/dev/null; then
+    # Try without --user (e.g. in a venv)
+    if ! $PIP_CMD install "$SCRIPT_DIR" 2>/dev/null; then
+        status_done "  $(echo -e "${RED}✗ Failed to install lip6tui${NC}")"
+        echo -e "${YELLOW}Try manually: pip install --user ${SCRIPT_DIR}${NC}"
+        exit 1
+    fi
+fi
+status_done "  $(echo -e "${GREEN}✓${NC} lip6tui installed (lip6-hpc, lip6-conv commands)")"
+
+# Write config.toml
+mkdir -p "$HOME/.lip6"
+cat > "$HOME/.lip6/config.toml" << CONFIGEOF
+[user]
+username = "${USERNAME}"
+email = "${EMAIL}"
+
+[clusters]
+gateway = "${GATEWAY}"
+hpc_enabled = $($SETUP_HPC && echo "true" || echo "false")
+conv_enabled = $($SETUP_CONV && echo "true" || echo "false")
+hpc_storage = "${HPC_STORAGE}"
+CONFIGEOF
+echo -e "  ${GREEN}✓${NC} Config written to ~/.lip6/config.toml"
+
+# Check that entry points are accessible
+LIP6_HPC_PATH=$(command -v lip6-hpc 2>/dev/null || $PYTHON_CMD -c "import sysconfig; print(sysconfig.get_path('scripts', 'posix_user'))" 2>/dev/null)
+if command -v lip6-hpc &>/dev/null; then
+    echo -e "  ${GREEN}✓${NC} lip6-hpc is in PATH"
+else
+    USER_BIN=$($PYTHON_CMD -c "import sysconfig; print(sysconfig.get_path('scripts', 'posix_user'))" 2>/dev/null)
+    if [ -n "$USER_BIN" ] && [ -f "${USER_BIN}/lip6-hpc" ]; then
+        echo -e "  ${YELLOW}!${NC} lip6-hpc installed at ${USER_BIN}/lip6-hpc"
+        echo -e "    ${DIM}Add to PATH: export PATH=\"${USER_BIN}:\$PATH\"${NC}"
+    fi
+fi
+
+# ---- LEGACY BLOCK: kept for reference but no longer generated ----
+# The old approach generated Bash scripts via heredocs with sed placeholders.
+# Now we install a Python package instead. The old scripts (~/hpc-notebook,
+# ~/conv-manager) are kept for backward compatibility if they already exist.
+SKIP_LEGACY_INSTALL=true
+if [ "$SKIP_LEGACY_INSTALL" = "true" ]; then
+    true  # Skip to aliases
+else
+# BEGIN OLD HEREDOC BLOCK (never reached)
 INSTALL_DIR="$HOME"
 
 if $SETUP_HPC; then
@@ -1700,6 +1797,7 @@ CONV_SCRIPT
     chmod +x "${INSTALL_DIR}/conv-manager"
     echo -e "${GREEN}Installed:${NC} ~/conv-manager (alias: conv)"
 fi
+fi  # END OLD HEREDOC BLOCK
 
 # ---- Shell aliases ----
 
@@ -1732,22 +1830,22 @@ if [ "$SHELL_NAME" = "fish" ]; then
         tmpfile=$(mktemp "${SHELL_CONFIG}.XXXXXX")
         grep -v 'alias hpc=' "$SHELL_CONFIG" > "$tmpfile" 2>/dev/null || true
         mv "$tmpfile" "$SHELL_CONFIG" 2>/dev/null || true
-        echo 'alias hpc="~/hpc-notebook"' >> "$SHELL_CONFIG"
+        echo 'alias hpc="lip6-hpc"' >> "$SHELL_CONFIG"
     fi
     if $SETUP_CONV; then
         tmpfile=$(mktemp "${SHELL_CONFIG}.XXXXXX")
         grep -v 'alias conv=' "$SHELL_CONFIG" > "$tmpfile" 2>/dev/null || true
         mv "$tmpfile" "$SHELL_CONFIG" 2>/dev/null || true
-        echo 'alias conv="~/conv-manager"' >> "$SHELL_CONFIG"
+        echo 'alias conv="lip6-conv"' >> "$SHELL_CONFIG"
     fi
 elif [ "$SHELL_NAME" = "zsh" ]; then
     SHELL_CONFIG="$HOME/.zshrc"
-    $SETUP_HPC && setup_alias "$SHELL_CONFIG" "hpc" "~/hpc-notebook"
-    $SETUP_CONV && setup_alias "$SHELL_CONFIG" "conv" "~/conv-manager"
+    $SETUP_HPC && setup_alias "$SHELL_CONFIG" "hpc" "lip6-hpc"
+    $SETUP_CONV && setup_alias "$SHELL_CONFIG" "conv" "lip6-conv"
 else
     SHELL_CONFIG="$HOME/.bashrc"
-    $SETUP_HPC && setup_alias "$SHELL_CONFIG" "hpc" "~/hpc-notebook"
-    $SETUP_CONV && setup_alias "$SHELL_CONFIG" "conv" "~/conv-manager"
+    $SETUP_HPC && setup_alias "$SHELL_CONFIG" "hpc" "lip6-hpc"
+    $SETUP_CONV && setup_alias "$SHELL_CONFIG" "conv" "lip6-conv"
 fi
 
 echo -e "${GREEN}Aliases added to ${SHELL_CONFIG}${NC}"
@@ -1921,10 +2019,12 @@ echo ""
 echo -e "${BOLD}Open a new terminal, then:${NC}"
 echo ""
 if $SETUP_HPC; then
-    echo -e "  ${GREEN}hpc${NC}   — CPU cluster manager (OAR, up to 48 cores)"
+    echo -e "  ${GREEN}hpc${NC}   — CPU cluster TUI manager (OAR, up to 48 cores)"
+    echo -e "        ${DIM}or: lip6-hpc${NC}"
 fi
 if $SETUP_CONV; then
-    echo -e "  ${GREEN}conv${NC}  — GPU cluster manager (SLURM, A100 GPUs)"
+    echo -e "  ${GREEN}conv${NC}  — GPU cluster TUI manager (SLURM, A100 GPUs)"
+    echo -e "        ${DIM}or: lip6-conv${NC}"
 fi
 echo ""
 echo -e "${BOLD}Quick SSH:${NC}"

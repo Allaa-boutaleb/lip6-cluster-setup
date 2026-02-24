@@ -1,0 +1,163 @@
+Screen {
+    background: $surface;
+}
+
+#dashboard {
+    height: 1fr;
+}
+
+#job-section {
+    height: 1fr;
+    padding: 0 1;
+}
+
+.section-title {
+    text-style: bold;
+    margin: 1 0 0 1;
+    color: $text;
+}
+
+.section-title-running {
+    text-style: bold;
+    margin: 1 0 0 1;
+    color: $success;
+}
+
+.section-title-pending {
+    text-style: bold;
+    margin: 1 0 0 1;
+    color: $warning;
+}
+
+.empty-message {
+    margin: 1 2;
+    color: $text-muted;
+}
+
+/* Launch screen */
+
+#launch-screen {
+    align: center middle;
+}
+
+#launch-container {
+    width: 70;
+    height: auto;
+    max-height: 90%;
+    border: round $primary;
+    padding: 1 2;
+    background: $surface;
+}
+
+#launch-container .form-title {
+    text-style: bold;
+    text-align: center;
+    margin: 0 0 1 0;
+    color: $primary;
+}
+
+#launch-container Input {
+    margin: 0 0 1 0;
+}
+
+#launch-container RadioSet {
+    margin: 0 0 1 0;
+    height: auto;
+}
+
+#launch-container .form-buttons {
+    margin: 1 0 0 0;
+    height: 3;
+    align: center middle;
+}
+
+#launch-container Button {
+    margin: 0 1;
+}
+
+/* Session ready screen */
+
+#session-screen {
+    align: center middle;
+}
+
+#session-container {
+    width: 70;
+    height: auto;
+    border: round $success;
+    padding: 1 2;
+    background: $surface;
+}
+
+#session-container .session-title {
+    text-style: bold;
+    text-align: center;
+    margin: 0 0 1 0;
+    color: $success;
+}
+
+#session-container .session-info {
+    margin: 0 0 0 2;
+}
+
+#session-container .session-url {
+    margin: 1 0;
+    text-style: bold;
+    color: $primary;
+    text-align: center;
+}
+
+#session-container .session-ssh {
+    margin: 1 0;
+    color: $text-muted;
+}
+
+#session-container .tunnel-status {
+    margin: 1 0;
+    color: $success;
+    text-align: center;
+}
+
+#session-container .form-buttons {
+    margin: 1 0 0 0;
+    height: 3;
+    align: center middle;
+}
+
+/* Waiting modal */
+
+#waiting-screen {
+    align: center middle;
+}
+
+#waiting-container {
+    width: 50;
+    height: auto;
+    border: round $warning;
+    padding: 2;
+    background: $surface;
+    text-align: center;
+}
+
+#waiting-container .waiting-title {
+    text-style: bold;
+    margin: 0 0 1 0;
+}
+
+#waiting-container .waiting-status {
+    margin: 1 0;
+    color: $warning;
+}
+
+#waiting-container .waiting-hint {
+    margin: 1 0;
+    color: $text-muted;
+}
+
+/* Error display */
+
+.error-message {
+    color: $error;
+    margin: 1 2;
+    text-style: bold;
+}
