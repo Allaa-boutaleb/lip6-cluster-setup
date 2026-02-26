@@ -12,18 +12,57 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+TUNNEL_DIR="/tmp/jupyter_tunnels_$(whoami)"
+mkdir -p "$TUNNEL_DIR" 2>/dev/null
+
+# Find a free local port for SSH tunneling
+find_free_port() {
+    python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'
+}
+
 # ---- Input validation ----
 
 is_int()  { [[ "$1" =~ ^[0-9]+$ ]]; }
 is_wall() { [[ "$1" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; }
 is_name() { [[ "$1" =~ ^[a-zA-Z0-9_.-]+$ ]]; }
 
+FUN_FACTS=(
+    "The first neural network (Perceptron) was built in 1958 by Frank Rosenblatt."
+    "GPT-3 has 175 billion parameters — more than the number of stars in the Milky Way."
+    "The term 'bug' originated from an actual moth found in a computer relay in 1947."
+    "The first computer programmer was Ada Lovelace, who wrote algorithms in the 1840s."
+    "The Python language is named after Monty Python, not the snake."
+    "AlphaGo's move 37 in game 2 against Lee Sedol had a 1 in 10,000 chance of being played by a human."
+    "The first 1GB hard drive (1980) weighed 550 pounds and cost \$40,000."
+    "Transformer models get their name from the 'Attention Is All You Need' paper (2017)."
+    "The first email was sent by Ray Tomlinson in 1971 — he can't remember what it said."
+    "The moon landing computer had 74KB of memory — less than a single emoji image."
+    "Backpropagation was popularized in 1986 but invented in the 1960s."
+    "The term 'artificial intelligence' was coined at Dartmouth College in 1956."
+    "Linux runs on 100% of the world's top 500 supercomputers."
+    "The first computer virus, Creeper, was created in 1971 as an experiment."
+    "Batch normalization (2015) accidentally became one of deep learning's greatest tricks."
+    "The ImageNet dataset that sparked the deep learning revolution contains 14 million images."
+    "Dennis Ritchie created C and co-created Unix — the foundations of modern computing."
+    "The first webcam was invented at Cambridge to monitor a coffee pot."
+    "A floppy disk's save icon outlived the floppy disk by decades."
+    "Claude Shannon's 1948 paper single-handedly founded information theory."
+)
+
 welcome() {
+    local fact="${FUN_FACTS[$((RANDOM % ${#FUN_FACTS[@]}))]}"
     echo ""
-    echo -e "${BLUE}================================================${NC}"
-    echo -e "${BOLD}         LIP6 HPC Cluster Manager${NC}"
-    echo -e "${DIM}    Allaa Boutaleb - allaa.boutaleb@lip6.fr${NC}"
-    echo -e "${BLUE}================================================${NC}"
+    echo -e "${BLUE}╔══════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║${NC}  ${BOLD}██╗  ██╗██████╗  ██████╗${NC}                  ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${BOLD}██║  ██║██╔══██╗██╔════╝${NC}                  ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${BOLD}███████║██████╔╝██║${NC}                       ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${BOLD}██╔══██║██╔═══╝ ██║${NC}                       ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${BOLD}██║  ██║██║     ╚██████╗${NC}                  ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${BOLD}╚═╝  ╚═╝╚═╝      ╚═════╝${NC}                 ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}   ${DIM}LIP6 HPC Cluster Manager${NC}                ${BLUE}║${NC}"
+    echo -e "${BLUE}╚══════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  ${CYAN}💡 ${fact}${NC}"
 }
 
 show_menu() {
@@ -35,6 +74,7 @@ show_menu() {
     echo -e "  ${GREEN}3${NC})  View my jobs"
     echo -e "  ${GREEN}4${NC})  Cancel jobs"
     echo -e "  ${GREEN}5${NC})  SSH into login node"
+    echo -e "  ${GREEN}6${NC})  Disconnect tunnel"
     echo -e "  ${RED}q${NC})  Quit"
     echo ""
 }
@@ -73,8 +113,6 @@ launch_session() {
         return
     fi
 
-    local port=8888
-
     echo ""
     echo -e "${CYAN}Submitting job: ${cores} cores, ${wall}...${NC}"
 
@@ -90,10 +128,9 @@ launch_session() {
         return
     fi
 
-    JOBID=$(ssh hpc bash -s "$cores" "$wall" "$port" << 'REMOTE'
+    JOBID=$(ssh hpc bash -s "$cores" "$wall" << 'REMOTE'
 CORES="$1"
 WALL="$2"
-PORT="$3"
 cat > ~/._jupyter_job.sh << JOBSCRIPT
 #!/bin/bash
 #OAR -l {host like 'big1%'}/nodes=1/core=${CORES},walltime=${WALL}
@@ -105,7 +142,8 @@ module load python/anaconda3
 eval "\$(conda shell.bash hook)"
 conda activate sqale
 
-jupyter lab --ip=0.0.0.0 --no-browser --port=${PORT}
+JUPYTER_PORT=\$(shuf -i 10000-60000 -n 1)
+jupyter lab --ip=0.0.0.0 --no-browser --port=\${JUPYTER_PORT}
 JOBSCRIPT
 chmod +x ~/._jupyter_job.sh
 oarsub -S ~/._jupyter_job.sh 2>&1 | grep -oP 'OAR_JOB_ID=\K[0-9]+'
@@ -140,13 +178,12 @@ REMOTE
         sleep 5
     done
 
-    connect_to_job "$JOBID" "$port" "$mode"
+    connect_to_job "$JOBID" "$mode"
 }
 
 connect_to_job() {
     local jobid="$1"
-    local port="${2:-8888}"
-    local mode="${3:-1}"
+    local mode="${2:-1}"
 
     local node
     node=$(ssh hpc "oarstat -f -j '$jobid' 2>/dev/null | grep 'assigned_hostnames' | awk '{print \$3}'")
@@ -172,12 +209,17 @@ connect_to_job() {
         return
     fi
 
-    # Parse actual port from Jupyter URL (handles port conflicts)
-    local actual_port
-    actual_port=$(echo "$url" | grep -oP ':\K[0-9]+(?=/)' | head -1)
-    actual_port="${actual_port:-$port}"
+    # Parse actual port from Jupyter URL
+    local remote_port
+    remote_port=$(echo "$url" | grep -oP ':\K[0-9]+(?=/)' | head -1)
+    if ! is_int "$remote_port"; then
+        echo -e "${RED}Could not determine Jupyter port.${NC}"
+        return
+    fi
+    local local_port
+    local_port=$(find_free_port)
     local local_url
-    local_url=$(echo "$url" | sed "s|http://[^:]*:|http://localhost:|")
+    local_url=$(echo "$url" | sed "s|http://[^:]*:${remote_port}|http://localhost:${local_port}|")
 
     echo ""
     echo -e "${GREEN}================================================${NC}"
@@ -189,13 +231,26 @@ connect_to_job() {
     echo -e "  ${BOLD}URL:${NC}   ${CYAN}$local_url${NC}"
     echo ""
 
+    # Start tunnel in background
+    ssh -N -L "${local_port}:${node}:${remote_port}" hpc &
+    local tunnel_pid=$!
+    sleep 1
+    if ! kill -0 "$tunnel_pid" 2>/dev/null; then
+        echo -e "${RED}Tunnel failed to start.${NC}"
+        return
+    fi
+    echo "$tunnel_pid $local_port" > "${TUNNEL_DIR}/${jobid}"
+    echo -e "${GREEN}Tunnel running in background (PID $tunnel_pid).${NC}"
+    echo -e "${DIM}Use option 6 to disconnect.${NC}"
+
+    echo -e "${CYAN}Opening Jupyter in browser...${NC}"
+    if command -v xdg-open &>/dev/null; then
+        xdg-open "$local_url" 2>/dev/null &
+    elif command -v open &>/dev/null; then
+        open "$local_url" &
+    fi
+
     if [ "$mode" = "3" ]; then
-        echo -e "${CYAN}Opening Jupyter in browser...${NC}"
-        if command -v xdg-open &>/dev/null; then
-            xdg-open "$local_url" 2>/dev/null &
-        elif command -v open &>/dev/null; then
-            open "$local_url" &
-        fi
         echo ""
         echo -e "${BOLD}To open a terminal on $node, run in another tab:${NC}"
         echo ""
@@ -204,25 +259,12 @@ connect_to_job() {
         echo -e "${DIM}Or with Kitty:${NC}"
         echo ""
         echo -e "  ${GREEN}kitty +kitten ssh -t hpc \"OAR_JOB_ID=$jobid oarsh $node\"${NC}"
-        echo ""
-        echo -e "${DIM}Tunnel active. Ctrl+C to disconnect (job keeps running).${NC}"
-        echo ""
-        ssh -N -L "${actual_port}:${node}:${actual_port}" hpc
-    elif [ "$mode" = "1" ]; then
-        echo -e "${CYAN}Opening Jupyter in browser...${NC}"
-        if command -v xdg-open &>/dev/null; then
-            xdg-open "$local_url" 2>/dev/null &
-        elif command -v open &>/dev/null; then
-            open "$local_url" &
-        fi
-        echo -e "${DIM}Tunnel active. Ctrl+C to disconnect (job keeps running).${NC}"
-        echo ""
-        ssh -N -L "${actual_port}:${node}:${actual_port}" hpc
     fi
 }
 
 my_jobs() {
     echo ""
+    echo -e "${DIM}Loading, please wait...${NC}"
     local output
     output=$(ssh hpc "oarstat -u boutalebm 2>/dev/null")
     if echo "$output" | grep -q "^[0-9]"; then
@@ -237,6 +279,7 @@ my_jobs() {
 
 cancel_job() {
     echo ""
+    echo -e "${DIM}Loading, please wait...${NC}"
     local output
     output=$(ssh hpc "oarstat -u boutalebm 2>/dev/null")
     if ! echo "$output" | grep -q "^[0-9]"; then
@@ -247,14 +290,14 @@ cancel_job() {
     echo ""
     echo "$output"
     echo ""
-    echo -e "Enter a job ID, or ${BOLD}all${NC} to cancel everything."
+    echo -e "Enter a job ID to cancel, or ${BOLD}all${NC} to cancel everything."
     read -p "> " jobid
     if [ "$jobid" = "all" ]; then
-        ssh hpc "for jid in \$(oarstat -u boutalebm 2>/dev/null | awk '/^[0-9]/{print \$1}'); do oardel \$jid; echo \"Cancelled \$jid\"; done"
-        echo -e "${GREEN}Done.${NC}"
+        ssh hpc "for jid in \$(oarstat -u boutalebm 2>/dev/null | awk '/^[0-9]/{print \$1}'); do oardel \$jid; rm -f ~/OAR.\${jid}.stderr ~/OAR.\${jid}.stdout; echo \"Cancelled \$jid\"; done"
+        echo -e "${GREEN}All jobs cancelled and log files cleaned up.${NC}"
     elif is_int "$jobid"; then
-        ssh hpc "oardel '$jobid'"
-        echo -e "${GREEN}Job $jobid cancelled.${NC}"
+        ssh hpc "oardel '$jobid'; rm -f ~/OAR.'${jobid}'.stderr ~/OAR.'${jobid}'.stdout"
+        echo -e "${GREEN}Job $jobid cancelled and log files cleaned up.${NC}"
     elif [ -n "$jobid" ]; then
         echo -e "${RED}Invalid job ID (must be a number).${NC}"
     fi
@@ -262,6 +305,7 @@ cancel_job() {
 
 connect_existing() {
     echo ""
+    echo -e "${DIM}Loading, please wait...${NC}"
     local output
     output=$(ssh hpc "oarstat -u boutalebm 2>/dev/null")
     if ! echo "$output" | grep -q "^[0-9]"; then
@@ -280,7 +324,7 @@ connect_existing() {
         echo ""
         echo "$output"
         echo ""
-        echo -e "Which job do you want to connect to?"
+        echo -e "Enter the job ID you want to connect to:"
         read -p "> " jobid
     fi
 
@@ -315,7 +359,50 @@ connect_existing() {
         echo -e "${CYAN}Connecting to $node...${NC}"
         ssh -t hpc "OAR_JOB_ID='$jobid' oarsh '$node'"
     else
-        connect_to_job "$jobid" 8888 "$mode"
+        connect_to_job "$jobid" "$mode"
+    fi
+}
+
+sever_tunnel() {
+    echo ""
+    local found=false
+    for f in "$TUNNEL_DIR"/*; do
+        [ -f "$f" ] || continue
+        local tid
+        tid=$(basename "$f")
+        local pid port
+        read -r pid port < "$f"
+        if kill -0 "$pid" 2>/dev/null; then
+            echo -e "  ${GREEN}Job $tid${NC} — localhost:$port (PID $pid)"
+            found=true
+        else
+            rm -f "$f"
+        fi
+    done
+
+    if ! $found; then
+        echo -e "${DIM}No active tunnels.${NC}"
+        return
+    fi
+
+    echo ""
+    echo -e "Enter a job ID to disconnect, or ${BOLD}all${NC} to disconnect everything."
+    read -p "> " choice
+    if [ "$choice" = "all" ]; then
+        for f in "$TUNNEL_DIR"/*; do
+            [ -f "$f" ] || continue
+            read -r pid port < "$f"
+            kill "$pid" 2>/dev/null
+            rm -f "$f"
+        done
+        echo -e "${GREEN}All tunnels disconnected.${NC}"
+    elif is_int "$choice" && [ -f "${TUNNEL_DIR}/${choice}" ]; then
+        read -r pid port < "${TUNNEL_DIR}/${choice}"
+        kill "$pid" 2>/dev/null
+        rm -f "${TUNNEL_DIR}/${choice}"
+        echo -e "${GREEN}Tunnel for job $choice disconnected.${NC}"
+    elif [ -n "$choice" ]; then
+        echo -e "${RED}Invalid choice.${NC}"
     fi
 }
 
@@ -331,6 +418,7 @@ while true; do
         3) my_jobs ;;
         4) cancel_job ;;
         5) ssh hpc ;;
+        6) sever_tunnel ;;
         q|Q) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
         *) echo -e "${RED}Invalid choice.${NC}" ;;
     esac

@@ -13,7 +13,13 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 CONV_USER="boutalebm"
-CONV_PORT=9888
+TUNNEL_DIR="/tmp/jupyter_tunnels_$(whoami)"
+mkdir -p "$TUNNEL_DIR" 2>/dev/null
+
+# Find a free local port for SSH tunneling
+find_free_port() {
+    python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'
+}
 
 # ---- Input validation ----
 
@@ -22,14 +28,44 @@ is_wall() { [[ "$1" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; }
 is_name() { [[ "$1" =~ ^[a-zA-Z0-9_.-]+$ ]]; }
 is_path() { [[ "$1" =~ ^[a-zA-Z0-9_.~/-]+$ ]]; }
 
+FUN_FACTS=(
+    "The first neural network (Perceptron) was built in 1958 by Frank Rosenblatt."
+    "GPT-3 has 175 billion parameters — more than the number of stars in the Milky Way."
+    "The term 'bug' originated from an actual moth found in a computer relay in 1947."
+    "A100 GPUs can perform 312 TFLOPS of mixed-precision operations."
+    "The first computer programmer was Ada Lovelace, who wrote algorithms in the 1840s."
+    "NVIDIA's name comes from 'invidia', the Latin word for envy."
+    "The Python language is named after Monty Python, not the snake."
+    "AlphaGo's move 37 in game 2 against Lee Sedol had a 1 in 10,000 chance of being played by a human."
+    "The first 1GB hard drive (1980) weighed 550 pounds and cost \$40,000."
+    "Transformer models get their name from the 'Attention Is All You Need' paper (2017)."
+    "The first email was sent by Ray Tomlinson in 1971 — he can't remember what it said."
+    "CUDA was introduced by NVIDIA in 2007, revolutionizing GPU computing."
+    "The moon landing computer had 74KB of memory — less than a single emoji image."
+    "Backpropagation was popularized in 1986 but invented in the 1960s."
+    "The term 'artificial intelligence' was coined at Dartmouth College in 1956."
+    "A single A100 GPU can replace hundreds of CPUs for deep learning workloads."
+    "Linux runs on 100% of the world's top 500 supercomputers."
+    "The first computer virus, Creeper, was created in 1971 as an experiment."
+    "Batch normalization (2015) accidentally became one of deep learning's greatest tricks."
+    "The ImageNet dataset that sparked the deep learning revolution contains 14 million images."
+)
+
 welcome() {
+    local fact="${FUN_FACTS[$((RANDOM % ${#FUN_FACTS[@]}))]}"
     echo ""
-    echo -e "${BLUE}================================================${NC}"
-    echo -e "${BOLD}     LIP6 Convergence GPU Cluster Manager${NC}"
-    echo -e "${DIM}    Allaa Boutaleb - allaa.boutaleb@lip6.fr${NC}"
-    echo -e "${BLUE}================================================${NC}"
+    echo -e "${BLUE}╔══════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║${NC} ${BOLD} ██████╗ ██████╗ ███╗   ██╗██╗   ██╗${NC}               ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC} ${BOLD}██╔════╝██╔═══██╗████╗  ██║██║   ██║${NC}               ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC} ${BOLD}██║     ██║   ██║██╔██╗ ██║██║   ██║${NC}               ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC} ${BOLD}██║     ██║   ██║██║╚██╗██║╚██╗ ██╔╝${NC}               ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC} ${BOLD}╚██████╗╚██████╔╝██║ ╚████║ ╚████╔╝${NC}               ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC} ${BOLD} ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝  ╚═══╝${NC}               ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}   ${DIM}CONVERGENCE · LIP6 GPU Cluster Manager${NC}         ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}   ${DIM}10 nodes | 40 x A100 80GB GPUs | SLURM${NC}        ${BLUE}║${NC}"
+    echo -e "${BLUE}╚══════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "${DIM}  10 nodes | 40 x A100 80GB GPUs | SLURM${NC}"
+    echo -e "  ${CYAN}💡 ${fact}${NC}"
 }
 
 show_menu() {
@@ -42,6 +78,7 @@ show_menu() {
     echo -e "  ${GREEN}4${NC})  Cancel jobs"
     echo -e "  ${GREEN}5${NC})  Cluster status (GPUs, nodes)"
     echo -e "  ${GREEN}6${NC})  SSH into login node"
+    echo -e "  ${GREEN}7${NC})  Disconnect tunnel"
     echo -e "  ${RED}q${NC})  Quit"
     echo ""
 }
@@ -126,12 +163,11 @@ launch_session() {
     echo ""
     echo -e "${CYAN}Submitting Jupyter Lab: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
 
-    JOBID=$(ssh conv bash -s "$num_gpus" "$GPU_TYPE" "$wall" "$CONV_PORT" "$job_name" << 'REMOTE'
+    JOBID=$(ssh conv bash -s "$num_gpus" "$GPU_TYPE" "$wall" "$job_name" << 'REMOTE'
 NUM_GPUS="$1"
 GPU_TYPE="$2"
 WALL="$3"
-PORT="$4"
-JOB_NAME="$5"
+JOB_NAME="$4"
 cat > ~/._conv_jupyter.sh << JOBSCRIPT
 #!/bin/bash
 #SBATCH --job-name=${JOB_NAME}
@@ -148,7 +184,8 @@ module purge
 module load python/anaconda3
 eval "\$(conda shell.bash hook)"
 
-jupyter lab --ip=0.0.0.0 --no-browser --port=${PORT}
+JUPYTER_PORT=\$(shuf -i 10000-60000 -n 1)
+jupyter lab --ip=0.0.0.0 --no-browser --port=\${JUPYTER_PORT}
 JOBSCRIPT
 sbatch ~/._conv_jupyter.sh 2>&1 | grep -oP 'Submitted batch job \K[0-9]+'
 REMOTE
@@ -260,12 +297,12 @@ connect_to_job() {
 
     local remote_port
     remote_port=$(echo "$url" | grep -oP ':\K[0-9]+(?=/)' | head -1)
-    remote_port="${remote_port:-$CONV_PORT}"
     if ! is_int "$remote_port"; then
         echo -e "${RED}Could not determine Jupyter port.${NC}"
         return
     fi
-    local local_port="$remote_port"
+    local local_port
+    local_port=$(find_free_port)
     local local_url
     local_url=$(echo "$url" | sed "s|http://[^:]*:${remote_port}|http://localhost:${local_port}|")
 
@@ -280,13 +317,26 @@ connect_to_job() {
     echo -e "  ${BOLD}URL:${NC}    ${CYAN}$local_url${NC}"
     echo ""
 
+    # Start tunnel in background
+    ssh -N -J conv -L "${local_port}:localhost:${remote_port}" "${node}.convergence.lip6.fr" &
+    local tunnel_pid=$!
+    sleep 1
+    if ! kill -0 "$tunnel_pid" 2>/dev/null; then
+        echo -e "${RED}Tunnel failed to start.${NC}"
+        return
+    fi
+    echo "$tunnel_pid $local_port" > "${TUNNEL_DIR}/${jobid}"
+    echo -e "${GREEN}Tunnel running in background (PID $tunnel_pid).${NC}"
+    echo -e "${DIM}Use option 7 to disconnect.${NC}"
+
+    echo -e "${CYAN}Opening Jupyter in browser...${NC}"
+    if command -v xdg-open &>/dev/null; then
+        xdg-open "$local_url" 2>/dev/null &
+    elif command -v open &>/dev/null; then
+        open "$local_url" &
+    fi
+
     if [ "$mode" = "3" ]; then
-        echo -e "${CYAN}Opening Jupyter in browser...${NC}"
-        if command -v xdg-open &>/dev/null; then
-            xdg-open "$local_url" 2>/dev/null &
-        elif command -v open &>/dev/null; then
-            open "$local_url" &
-        fi
         echo ""
         echo -e "${BOLD}To open a terminal on $node, run in another tab:${NC}"
         echo ""
@@ -295,25 +345,12 @@ connect_to_job() {
         echo -e "${DIM}Or with Kitty:${NC}"
         echo ""
         echo -e "  ${GREEN}kitty +kitten ssh -t -J conv ${node}.convergence.lip6.fr${NC}"
-        echo ""
-        echo -e "${DIM}Tunnel active (port ${remote_port}). Ctrl+C to disconnect (job keeps running).${NC}"
-        echo ""
-        ssh -N -J conv -L "${local_port}:localhost:${remote_port}" "${node}.convergence.lip6.fr"
-    elif [ "$mode" = "1" ]; then
-        echo -e "${CYAN}Opening Jupyter in browser...${NC}"
-        if command -v xdg-open &>/dev/null; then
-            xdg-open "$local_url" 2>/dev/null &
-        elif command -v open &>/dev/null; then
-            open "$local_url" &
-        fi
-        echo -e "${DIM}Tunnel active (port ${remote_port}). Ctrl+C to disconnect (job keeps running).${NC}"
-        echo ""
-        ssh -N -J conv -L "${local_port}:localhost:${remote_port}" "${node}.convergence.lip6.fr"
     fi
 }
 
 my_jobs() {
     echo ""
+    echo -e "${DIM}Loading, please wait...${NC}"
     local output
     output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
     if ssh conv "squeue -h -u '${CONV_USER}' 2>/dev/null" 2>/dev/null | grep -q .; then
@@ -339,6 +376,7 @@ my_jobs() {
 
 cancel_job() {
     echo ""
+    echo -e "${DIM}Loading, please wait...${NC}"
     local output
     output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
     if ! ssh conv "squeue -h -u '${CONV_USER}' 2>/dev/null" 2>/dev/null | grep -q .; then
@@ -349,20 +387,22 @@ cancel_job() {
     echo ""
     echo "$output"
     echo ""
-    echo -e "Enter a job ID, or ${BOLD}all${NC} to cancel everything."
+    echo -e "Enter a job ID to cancel, or ${BOLD}all${NC} to cancel everything."
     read -p "> " jobid
     if [ "$jobid" = "all" ]; then
-        ssh conv "scancel -u '${CONV_USER}' 2>/dev/null" 2>/dev/null
-        echo -e "${GREEN}All jobs cancelled.${NC}"
+        ssh conv "for jid in \$(squeue -h -u '${CONV_USER}' -o '%i' 2>/dev/null); do rm -f ~/*-\${jid}.out ~/*-\${jid}.err; done; scancel -u '${CONV_USER}'" 2>/dev/null
+        echo -e "${GREEN}All jobs cancelled and log files cleaned up.${NC}"
     elif is_int "$jobid"; then
-        ssh conv "scancel '$jobid' 2>/dev/null" 2>/dev/null
-        echo -e "${GREEN}Job $jobid cancelled.${NC}"
+        ssh conv "scancel '$jobid'; rm -f ~/*-'${jobid}'.out ~/*-'${jobid}'.err" 2>/dev/null
+        echo -e "${GREEN}Job $jobid cancelled and log files cleaned up.${NC}"
     elif [ -n "$jobid" ]; then
         echo -e "${RED}Invalid job ID (must be a number, or 'all').${NC}"
     fi
 }
 
 cluster_status() {
+    echo ""
+    echo -e "${DIM}Loading, please wait...${NC}"
     echo ""
     echo -e "${BOLD}Cluster status:${NC}"
     echo ""
@@ -372,6 +412,7 @@ cluster_status() {
 
 connect_existing() {
     echo ""
+    echo -e "${DIM}Loading, please wait...${NC}"
     local output
     output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
     if ! ssh conv "squeue -h -u '${CONV_USER}' 2>/dev/null" 2>/dev/null | grep -q .; then
@@ -392,7 +433,7 @@ connect_existing() {
         echo ""
         echo "$output"
         echo ""
-        echo -e "Which job do you want to connect to?"
+        echo -e "Enter the job ID you want to connect to:"
         read -p "> " jobid
         if [ -n "$jobid" ]; then
             job_name=$(ssh conv "squeue -j '$jobid' -h -o '%j' 2>/dev/null" 2>/dev/null)
@@ -434,6 +475,49 @@ connect_existing() {
     fi
 }
 
+sever_tunnel() {
+    echo ""
+    local found=false
+    for f in "$TUNNEL_DIR"/*; do
+        [ -f "$f" ] || continue
+        local tid
+        tid=$(basename "$f")
+        local pid port
+        read -r pid port < "$f"
+        if kill -0 "$pid" 2>/dev/null; then
+            echo -e "  ${GREEN}Job $tid${NC} — localhost:$port (PID $pid)"
+            found=true
+        else
+            rm -f "$f"
+        fi
+    done
+
+    if ! $found; then
+        echo -e "${DIM}No active tunnels.${NC}"
+        return
+    fi
+
+    echo ""
+    echo -e "Enter a job ID to disconnect, or ${BOLD}all${NC} to disconnect everything."
+    read -p "> " choice
+    if [ "$choice" = "all" ]; then
+        for f in "$TUNNEL_DIR"/*; do
+            [ -f "$f" ] || continue
+            read -r pid port < "$f"
+            kill "$pid" 2>/dev/null
+            rm -f "$f"
+        done
+        echo -e "${GREEN}All tunnels disconnected.${NC}"
+    elif is_int "$choice" && [ -f "${TUNNEL_DIR}/${choice}" ]; then
+        read -r pid port < "${TUNNEL_DIR}/${choice}"
+        kill "$pid" 2>/dev/null
+        rm -f "${TUNNEL_DIR}/${choice}"
+        echo -e "${GREEN}Tunnel for job $choice disconnected.${NC}"
+    elif [ -n "$choice" ]; then
+        echo -e "${RED}Invalid choice.${NC}"
+    fi
+}
+
 # Entry point
 welcome
 
@@ -447,6 +531,7 @@ while true; do
         4) cancel_job ;;
         5) cluster_status ;;
         6) ssh conv ;;
+        7) sever_tunnel ;;
         q|Q) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
         *) echo -e "${RED}Invalid choice.${NC}" ;;
     esac
