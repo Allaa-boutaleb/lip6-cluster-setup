@@ -137,39 +137,39 @@ launch_session() {
         return
     fi
 
-    JOBID=$(ssh hpc bash --login -s "$cores" "$wall" << 'REMOTE'
+    JOBID=$(ssh hpc bash -s "$cores" "$wall" << 'REMOTE'
 CORES="$1"
 WALL="$2"
 
-# Ensure hpc_jupyter conda env exists with Jupyter
-module purge
-module load python/anaconda3
-eval "$(conda shell.bash hook)"
-
-if ! conda env list 2>/dev/null | grep -q "hpc_jupyter"; then
-    conda create -y -n hpc_jupyter python 2>&1
-    conda install -y -n hpc_jupyter notebook jupyterlab 2>&1
-else
-    conda activate hpc_jupyter
-    if ! command -v jupyter &>/dev/null; then
-        conda install -y -n hpc_jupyter notebook jupyterlab 2>&1
-    fi
-fi
-
-cat > ~/._jupyter_job.sh << JOBSCRIPT
+cat > ~/._jupyter_job.sh << 'JOBSCRIPT'
 #!/bin/bash
-#OAR -l {host like 'big1%'}/nodes=1/core=${CORES},walltime=${WALL}
+#OAR -l {host like 'big%'}/nodes=1/core=__CORES__,walltime=__WALL__
 #OAR --notify mail:allaa.boutaleb@lip6.fr
 
 source /etc/profile.d/modules.sh
 module purge
 module load python/anaconda3
-eval "\$(conda shell.bash hook)"
+eval "$(conda shell.bash hook)"
+
+# Ensure hpc_jupyter conda env exists with Jupyter
+if ! conda env list 2>/dev/null | grep -q "hpc_jupyter"; then
+    echo "Creating hpc_jupyter environment..."
+    conda create -y -n hpc_jupyter python
+    conda install -y -n hpc_jupyter notebook jupyterlab
+fi
+
 conda activate hpc_jupyter
 
-JUPYTER_PORT=\$(shuf -i 10000-60000 -n 1)
-jupyter lab --ip=0.0.0.0 --no-browser --port=\${JUPYTER_PORT}
+# Install jupyter if missing
+if ! command -v jupyter &>/dev/null; then
+    echo "Installing Jupyter in hpc_jupyter..."
+    conda install -y notebook jupyterlab
+fi
+
+JUPYTER_PORT=$(shuf -i 10000-60000 -n 1)
+jupyter lab --ip=0.0.0.0 --no-browser --port=${JUPYTER_PORT}
 JOBSCRIPT
+sed -i "s/__CORES__/${CORES}/g; s/__WALL__/${WALL}/g" ~/._jupyter_job.sh
 chmod +x ~/._jupyter_job.sh
 oarsub -S ~/._jupyter_job.sh 2>&1 | grep -oP 'OAR_JOB_ID=\K[0-9]+'
 REMOTE
