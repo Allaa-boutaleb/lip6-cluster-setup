@@ -210,7 +210,7 @@ REMOTE
 
     local attempts=0
     while true; do
-        STATE=$(ssh conv "squeue -j '$JOBID' -h -o '%T' 2>/dev/null" 2>/dev/null)
+        STATE=$(ssh conv bash -c "\"squeue -j $JOBID -h -o '%T'\"" 2>/dev/null)
         if [ "$STATE" = "RUNNING" ]; then
             break
         elif [ "$STATE" = "FAILED" ] || [ "$STATE" = "CANCELLED" ] || [ "$STATE" = "TIMEOUT" ]; then
@@ -280,7 +280,7 @@ connect_to_job() {
     local job_name="${3:-gpu-session}"
 
     local node
-    node=$(ssh conv "squeue -j '$jobid' -h -o '%N' 2>/dev/null" 2>/dev/null)
+    node=$(ssh conv bash -c "\"squeue -j $jobid -h -o '%N'\"" 2>/dev/null)
     if [ -z "$node" ] || ! is_name "$node"; then
         echo -e "${RED}Could not find node for job $jobid${NC}"
         return
@@ -359,30 +359,43 @@ connect_to_job() {
 my_jobs() {
     echo ""
     echo -e "${DIM}Loading, please wait...${NC}"
-    if ! ssh conv "squeue -h -u '${CONV_USER}' 2>/dev/null" 2>/dev/null | grep -q .; then
+
+    local raw
+    raw=$(ssh conv bash -c "\"squeue -h -u ${CONV_USER} -o '%i|%j|%T|%M|%l|%L|%R'\"" 2>/dev/null)
+
+    if [ -z "$raw" ]; then
         echo -e "${DIM}No running jobs.${NC}"
         echo ""
         return
     fi
 
-    local running
-    running=$(ssh conv "squeue -h -u '${CONV_USER}' -t RUNNING -o '  %-8i %-20j %-12M %-12l %-12L %-15R' 2>/dev/null" 2>/dev/null)
-    local pending
-    pending=$(ssh conv "squeue -h -u '${CONV_USER}' -t PENDING -o '  %-8i %-20j %-12l %-20R' 2>/dev/null" 2>/dev/null)
+    local has_running=false has_pending=false
+    local running_lines="" pending_lines=""
 
-    if [ -n "$running" ]; then
+    while IFS='|' read -r jid name state elapsed limit left node; do
+        [ -z "$jid" ] && continue
+        if [ "$state" = "RUNNING" ]; then
+            running_lines+="$(printf "  %-8s %-20s %-12s %-12s %-12s %s\n" "$jid" "$name" "$elapsed" "$limit" "$left" "$node")"$'\n'
+            has_running=true
+        else
+            pending_lines+="$(printf "  %-8s %-20s %-12s %s\n" "$jid" "$name" "$limit" "$node")"$'\n'
+            has_pending=true
+        fi
+    done <<< "$raw"
+
+    if $has_running; then
         echo -e "${GREEN}${BOLD}RUNNING${NC}"
-        printf "  %-8s %-20s %-12s %-12s %-12s %-15s\n" "JobID" "Name" "Elapsed" "TimeLimit" "TimeLeft" "Node"
+        printf "  %-8s %-20s %-12s %-12s %-12s %s\n" "JobID" "Name" "Elapsed" "TimeLimit" "TimeLeft" "Node"
         echo -e "  ${DIM}────────────────────────────────────────────────────────────────────────────────${NC}"
-        echo "$running"
+        printf "%s" "$running_lines"
     fi
 
-    if [ -n "$pending" ]; then
-        [ -n "$running" ] && echo ""
+    if $has_pending; then
+        $has_running && echo ""
         echo -e "${YELLOW}${BOLD}PENDING${NC}"
-        printf "  %-8s %-20s %-12s %-20s\n" "JobID" "Name" "TimeLimit" "Reason"
+        printf "  %-8s %-20s %-12s %s\n" "JobID" "Name" "TimeLimit" "Reason"
         echo -e "  ${DIM}──────────────────────────────────────────────────────────────${NC}"
-        echo "$pending"
+        printf "%s" "$pending_lines"
     fi
 
     echo ""
@@ -402,22 +415,28 @@ my_jobs() {
 cancel_job() {
     echo ""
     echo -e "${DIM}Loading, please wait...${NC}"
-    if ! ssh conv "squeue -h -u '${CONV_USER}' 2>/dev/null" 2>/dev/null | grep -q .; then
+
+    local raw
+    raw=$(ssh conv bash -c "\"squeue -h -u ${CONV_USER} -o '%i|%j|%T|%M|%l|%R'\"" 2>/dev/null)
+
+    if [ -z "$raw" ]; then
         echo -e "${DIM}No running jobs to cancel.${NC}"
         return
     fi
-    local output
-    output=$(ssh conv "squeue -u '${CONV_USER}' -o '  %-8i %-20j %-10T %-12M %-12l %-15R' 2>/dev/null" 2>/dev/null)
+
     echo -e "${BOLD}Your jobs:${NC}"
     echo ""
-    printf "  %-8s %-20s %-10s %-12s %-12s %-15s\n" "JobID" "Name" "State" "Elapsed" "TimeLimit" "Node"
+    printf "  %-8s %-20s %-10s %-12s %-12s %s\n" "JobID" "Name" "State" "Elapsed" "TimeLimit" "Node"
     echo -e "  ${DIM}────────────────────────────────────────────────────────────────────────────────${NC}"
-    echo "$output"
+    while IFS='|' read -r jid name state elapsed limit node; do
+        [ -z "$jid" ] && continue
+        printf "  %-8s %-20s %-10s %-12s %-12s %s\n" "$jid" "$name" "$state" "$elapsed" "$limit" "$node"
+    done <<< "$raw"
     echo ""
     echo -e "Enter a job ID to cancel, or ${BOLD}all${NC} to cancel everything."
     read -p "> " jobid
     if [ "$jobid" = "all" ]; then
-        ssh conv "for jid in \$(squeue -h -u '${CONV_USER}' -o '%i' 2>/dev/null); do rm -f ~/*-\${jid}.out ~/*-\${jid}.err; done; scancel -u '${CONV_USER}'" 2>/dev/null
+        ssh conv "bash -c 'for jid in \$(squeue -h -u ${CONV_USER} -o \"%i\"); do rm -f ~/*-\${jid}.out ~/*-\${jid}.err; done; scancel -u ${CONV_USER}'" 2>/dev/null
         echo -e "${GREEN}All jobs cancelled and log files cleaned up.${NC}"
     elif is_int "$jobid"; then
         ssh conv "scancel '$jobid'; rm -f ~/*-'${jobid}'.out ~/*-'${jobid}'.err" 2>/dev/null
@@ -440,32 +459,41 @@ cluster_status() {
 connect_existing() {
     echo ""
     echo -e "${DIM}Loading, please wait...${NC}"
-    if ! ssh conv "squeue -h -u '${CONV_USER}' 2>/dev/null" 2>/dev/null | grep -q .; then
+
+    local raw
+    raw=$(ssh conv bash -c "\"squeue -h -u ${CONV_USER} -o '%i|%j|%T|%M|%l|%L|%R'\"" 2>/dev/null)
+
+    if [ -z "$raw" ]; then
         echo -e "${DIM}No running jobs to connect to.${NC}"
         return
     fi
 
-    local job_ids=($(ssh conv "squeue -h -u '${CONV_USER}' -o '%i' 2>/dev/null" 2>/dev/null))
+    local job_ids=()
+    while IFS='|' read -r jid rest; do
+        [ -n "$jid" ] && job_ids+=("$jid")
+    done <<< "$raw"
+
     local jobid=""
     local job_name=""
 
     if [ ${#job_ids[@]} -eq 1 ]; then
         jobid="${job_ids[0]}"
-        job_name=$(ssh conv "squeue -h -j '${jobid}' -o '%j' 2>/dev/null" 2>/dev/null)
+        job_name=$(ssh conv bash -c "\"squeue -h -j ${jobid} -o '%j'\"" 2>/dev/null)
         echo -e "Auto-selecting your only running job: ${BOLD}$jobid${NC}"
     else
-        local output
-        output=$(ssh conv "squeue -u '${CONV_USER}' -o '  %-8i %-20j %-10T %-12M %-12l %-15R' 2>/dev/null" 2>/dev/null)
         echo -e "${BOLD}Your jobs:${NC}"
         echo ""
-        printf "  %-8s %-20s %-10s %-12s %-12s %-15s\n" "JobID" "Name" "State" "Elapsed" "TimeLimit" "Node"
+        printf "  %-8s %-20s %-10s %-12s %-12s %s\n" "JobID" "Name" "State" "Elapsed" "TimeLimit" "Node"
         echo -e "  ${DIM}────────────────────────────────────────────────────────────────────────────────${NC}"
-        echo "$output"
+        while IFS='|' read -r jid name state elapsed limit left node; do
+            [ -z "$jid" ] && continue
+            printf "  %-8s %-20s %-10s %-12s %-12s %s\n" "$jid" "$name" "$state" "$elapsed" "$limit" "$node"
+        done <<< "$raw"
         echo ""
         echo -e "Enter the job ID you want to connect to:"
         read -p "> " jobid
         if [ -n "$jobid" ]; then
-            job_name=$(ssh conv "squeue -j '$jobid' -h -o '%j' 2>/dev/null" 2>/dev/null)
+            job_name=$(ssh conv bash -c "\"squeue -h -j $jobid -o '%j'\"" 2>/dev/null)
         fi
     fi
 
@@ -492,7 +520,7 @@ connect_existing() {
 
     if [ "$mode" = "2" ]; then
         local node
-        node=$(ssh conv "squeue -j '$jobid' -h -o '%N' 2>/dev/null" 2>/dev/null)
+        node=$(ssh conv bash -c "\"squeue -j $jobid -h -o '%N'\"" 2>/dev/null)
         if [ -z "$node" ] || ! is_name "$node"; then
             echo -e "${RED}Could not find node for job $jobid${NC}"
             return
