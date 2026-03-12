@@ -8,6 +8,7 @@ GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
 RED='\033[1;31m'
 CYAN='\033[1;36m'
+PURPLE='\033[1;35m'
 DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
@@ -54,21 +55,25 @@ FUN_FACTS=(
 welcome() {
     local fact="${FUN_FACTS[$((RANDOM % ${#FUN_FACTS[@]}))]}"
     echo ""
-    echo -e "${BLUE}┌──────────────────────────────────────────────────────┐${NC}"
-    echo -e "${BLUE}│${NC}                                                      ${BLUE}│${NC}"
-    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN} ██████╗ ██████╗ ███╗   ██╗██╗   ██╗${NC}               ${BLUE}│${NC}"
-    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN}██╔════╝██╔═══██╗████╗  ██║██║   ██║${NC}               ${BLUE}│${NC}"
-    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN}██║     ██║   ██║██╔██╗ ██║██║   ██║${NC}               ${BLUE}│${NC}"
-    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN}██║     ██║   ██║██║╚██╗██║╚██╗ ██╔╝${NC}               ${BLUE}│${NC}"
-    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN}╚██████╗╚██████╔╝██║ ╚████║ ╚████╔╝${NC}               ${BLUE}│${NC}"
-    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN} ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝  ╚═══╝${NC}               ${BLUE}│${NC}"
-    echo -e "${BLUE}│${NC}                                                      ${BLUE}│${NC}"
-    echo -e "${BLUE}│${NC}   ${GREEN}CONVERGENCE${NC} ${DIM}· LIP6 GPU Cluster Manager${NC}         ${BLUE}│${NC}"
-    echo -e "${BLUE}│${NC}   ${DIM}10 nodes  ·  4x A100 80GB  ·  SLURM${NC}            ${BLUE}│${NC}"
-    echo -e "${BLUE}│${NC}                                                      ${BLUE}│${NC}"
-    echo -e "${BLUE}└──────────────────────────────────────────────────────┘${NC}"
+    local art
+    art=$(cat << 'EOF'
+ _____ _____ _   _ _   _ ___________ _____  _____ _   _ _____  _____
+/  __ \  _  | \ | | | | |  ___| ___ \  __ \|  ___| \ | /  __ \|  ___|
+| /  \/ | | |  \| | | | | |__ | |_/ / |  \/| |__ |  \| | /  \/| |__
+| |   | | | | . ` | | | |  __||    /| | __ |  __|| . ` | |    |  __|
+| \__/\ \_/ / |\  \ \_/ / |___| |\ \| |_\ \| |___| |\  | \__/\| |___
+ \____/\___/\_| \_/\___/\____/\_| \_|\____/\____/\_| \_/\____/\____/
+EOF
+    )
+    while IFS= read -r line; do
+        printf "  ${PURPLE}%s${NC}\n" "$line"
+        sleep 0.03
+    done <<< "$art"
     echo ""
-    echo -e "  ${CYAN}💡 ${fact}${NC}"
+    printf "  ${GREEN}CONVERGENCE${NC} ${DIM}· LIP6 GPU Cluster Manager${NC}\n"
+    printf "  ${DIM}10 nodes · 4x A100 80GB · SLURM${NC}\n"
+    echo ""
+    printf "  ${DIM}💡 %s${NC}\n" "$fact"
 }
 
 show_menu() {
@@ -354,25 +359,42 @@ connect_to_job() {
 my_jobs() {
     echo ""
     echo -e "${DIM}Loading, please wait...${NC}"
-    local output
-    output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
-    if ssh conv "squeue -h -u '${CONV_USER}' 2>/dev/null" 2>/dev/null | grep -q .; then
-        echo -e "${BOLD}Your jobs:${NC}"
-        echo ""
-        echo "$output"
-        echo ""
-        echo -e "${DIM}Detailed info on a job:${NC}"
-        read -p "Job ID (or Enter to skip): " jobid
-        if [ -n "$jobid" ]; then
-            if ! is_int "$jobid"; then
-                echo -e "${RED}Invalid job ID (must be a number).${NC}"
-                return
-            fi
-            echo ""
-            ssh conv "sacct -j '$jobid' --format='JobID,JobName,NodeList,AllocTres%80,Start,End,State' -X 2>/dev/null" 2>/dev/null
-        fi
-    else
+    if ! ssh conv "squeue -h -u '${CONV_USER}' 2>/dev/null" 2>/dev/null | grep -q .; then
         echo -e "${DIM}No running jobs.${NC}"
+        echo ""
+        return
+    fi
+
+    local running
+    running=$(ssh conv "squeue -h -u '${CONV_USER}' -t RUNNING -o '  %-8i %-20j %-12M %-12l %-12L %-15R' 2>/dev/null" 2>/dev/null)
+    local pending
+    pending=$(ssh conv "squeue -h -u '${CONV_USER}' -t PENDING -o '  %-8i %-20j %-12l %-20R' 2>/dev/null" 2>/dev/null)
+
+    if [ -n "$running" ]; then
+        echo -e "${GREEN}${BOLD}RUNNING${NC}"
+        printf "  %-8s %-20s %-12s %-12s %-12s %-15s\n" "JobID" "Name" "Elapsed" "TimeLimit" "TimeLeft" "Node"
+        echo -e "  ${DIM}────────────────────────────────────────────────────────────────────────────────${NC}"
+        echo "$running"
+    fi
+
+    if [ -n "$pending" ]; then
+        [ -n "$running" ] && echo ""
+        echo -e "${YELLOW}${BOLD}PENDING${NC}"
+        printf "  %-8s %-20s %-12s %-20s\n" "JobID" "Name" "TimeLimit" "Reason"
+        echo -e "  ${DIM}──────────────────────────────────────────────────────────────${NC}"
+        echo "$pending"
+    fi
+
+    echo ""
+    echo -e "${DIM}Detailed info on a job:${NC}"
+    read -p "Job ID (or Enter to skip): " jobid
+    if [ -n "$jobid" ]; then
+        if ! is_int "$jobid"; then
+            echo -e "${RED}Invalid job ID (must be a number).${NC}"
+            return
+        fi
+        echo ""
+        ssh conv "sacct -j '$jobid' --format='JobID,JobName,NodeList,AllocTres%80,Start,End,State' -X 2>/dev/null" 2>/dev/null
     fi
     echo ""
 }
@@ -380,14 +402,16 @@ my_jobs() {
 cancel_job() {
     echo ""
     echo -e "${DIM}Loading, please wait...${NC}"
-    local output
-    output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
     if ! ssh conv "squeue -h -u '${CONV_USER}' 2>/dev/null" 2>/dev/null | grep -q .; then
         echo -e "${DIM}No running jobs to cancel.${NC}"
         return
     fi
+    local output
+    output=$(ssh conv "squeue -u '${CONV_USER}' -o '  %-8i %-20j %-10T %-12M %-12l %-15R' 2>/dev/null" 2>/dev/null)
     echo -e "${BOLD}Your jobs:${NC}"
     echo ""
+    printf "  %-8s %-20s %-10s %-12s %-12s %-15s\n" "JobID" "Name" "State" "Elapsed" "TimeLimit" "Node"
+    echo -e "  ${DIM}────────────────────────────────────────────────────────────────────────────────${NC}"
     echo "$output"
     echo ""
     echo -e "Enter a job ID to cancel, or ${BOLD}all${NC} to cancel everything."
@@ -416,8 +440,6 @@ cluster_status() {
 connect_existing() {
     echo ""
     echo -e "${DIM}Loading, please wait...${NC}"
-    local output
-    output=$(ssh conv "squeue -u '${CONV_USER}' 2>/dev/null" 2>/dev/null)
     if ! ssh conv "squeue -h -u '${CONV_USER}' 2>/dev/null" 2>/dev/null | grep -q .; then
         echo -e "${DIM}No running jobs to connect to.${NC}"
         return
@@ -432,8 +454,12 @@ connect_existing() {
         job_name=$(ssh conv "squeue -h -j '${jobid}' -o '%j' 2>/dev/null" 2>/dev/null)
         echo -e "Auto-selecting your only running job: ${BOLD}$jobid${NC}"
     else
+        local output
+        output=$(ssh conv "squeue -u '${CONV_USER}' -o '  %-8i %-20j %-10T %-12M %-12l %-15R' 2>/dev/null" 2>/dev/null)
         echo -e "${BOLD}Your jobs:${NC}"
         echo ""
+        printf "  %-8s %-20s %-10s %-12s %-12s %-15s\n" "JobID" "Name" "State" "Elapsed" "TimeLimit" "Node"
+        echo -e "  ${DIM}────────────────────────────────────────────────────────────────────────────────${NC}"
         echo "$output"
         echo ""
         echo -e "Enter the job ID you want to connect to:"
