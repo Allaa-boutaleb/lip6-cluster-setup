@@ -52,15 +52,18 @@ FUN_FACTS=(
 welcome() {
     local fact="${FUN_FACTS[$((RANDOM % ${#FUN_FACTS[@]}))]}"
     echo ""
-    echo -e "${BLUE}╔══════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║${NC}  ${BOLD}██╗  ██╗██████╗  ██████╗${NC}                  ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}  ${BOLD}██║  ██║██╔══██╗██╔════╝${NC}                  ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}  ${BOLD}███████║██████╔╝██║${NC}                       ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}  ${BOLD}██╔══██║██╔═══╝ ██║${NC}                       ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}  ${BOLD}██║  ██║██║     ╚██████╗${NC}                  ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}  ${BOLD}╚═╝  ╚═╝╚═╝      ╚═════╝${NC}                 ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   ${DIM}LIP6 HPC Cluster Manager${NC}                ${BLUE}║${NC}"
-    echo -e "${BLUE}╚══════════════════════════════════════════════╝${NC}"
+    echo -e "${BLUE}┌──────────────────────────────────────────────┐${NC}"
+    echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN}██╗  ██╗██████╗  ██████╗${NC}                  ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN}██║  ██║██╔══██╗██╔════╝${NC}                  ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN}███████║██████╔╝██║${NC}                       ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN}██╔══██║██╔═══╝ ██║${NC}                       ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN}██║  ██║██║     ╚██████╗${NC}                  ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN}╚═╝  ╚═╝╚═╝      ╚═════╝${NC}                 ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}   ${GREEN}HPC${NC} ${DIM}· LIP6 Cluster Manager  ·  OAR${NC}       ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
+    echo -e "${BLUE}└──────────────────────────────────────────────┘${NC}"
     echo ""
     echo -e "  ${CYAN}💡 ${fact}${NC}"
 }
@@ -131,6 +134,23 @@ launch_session() {
     JOBID=$(ssh hpc bash -s "$cores" "$wall" << 'REMOTE'
 CORES="$1"
 WALL="$2"
+
+# Ensure hpc_jupyter conda env exists with Jupyter
+source /etc/profile.d/modules.sh
+module purge
+module load python/anaconda3
+eval "$(conda shell.bash hook)"
+
+if ! conda env list 2>/dev/null | grep -q "hpc_jupyter"; then
+    conda create -y -n hpc_jupyter >/dev/null 2>&1
+    conda install -y -n hpc_jupyter jupyterlab >/dev/null 2>&1
+else
+    conda activate hpc_jupyter
+    if ! command -v jupyter &>/dev/null; then
+        conda install -y -n hpc_jupyter jupyterlab >/dev/null 2>&1
+    fi
+fi
+
 cat > ~/._jupyter_job.sh << JOBSCRIPT
 #!/bin/bash
 #OAR -l {host like 'big1%'}/nodes=1/core=${CORES},walltime=${WALL}
@@ -140,7 +160,7 @@ source /etc/profile.d/modules.sh
 module purge
 module load python/anaconda3
 eval "\$(conda shell.bash hook)"
-conda activate sqale
+conda activate hpc_jupyter
 
 JUPYTER_PORT=\$(shuf -i 10000-60000 -n 1)
 jupyter lab --ip=0.0.0.0 --no-browser --port=\${JUPYTER_PORT}

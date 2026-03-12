@@ -724,20 +724,29 @@ launch_session() {
     echo ""
     echo -e "${CYAN}Submitting job: ${cores} cores, ${wall}...${NC}"
 
-    # Check if Jupyter is available
-    status_line "  ● Checking Jupyter installation..."
-    jupyter_check=$(ssh hpc 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; which jupyter 2>/dev/null' 2>/dev/null)
-    if [ -z "$jupyter_check" ]; then
-        status_done "  $(echo -e "${YELLOW}! Jupyter not found. Installing...${NC}")"
-        ssh hpc 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; pip install --quiet jupyterlab' 2>/dev/null
+    # Ensure hpc_jupyter conda env exists with Jupyter installed
+    status_line "  ● Checking hpc_jupyter conda environment..."
+    env_status=$(ssh hpc 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; if conda env list 2>/dev/null | grep -q "hpc_jupyter"; then conda activate hpc_jupyter; if command -v jupyter &>/dev/null; then echo "READY"; else echo "NO_JUPYTER"; fi; else echo "NO_ENV"; fi' 2>/dev/null)
+    if [ "$env_status" = "NO_ENV" ]; then
+        status_done "  $(echo -e "${YELLOW}! hpc_jupyter env not found. Creating...${NC}")"
+        ssh hpc 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; conda create -y -n hpc_jupyter && conda install -y -n hpc_jupyter jupyterlab' 2>/dev/null
         if [ $? -eq 0 ]; then
-            echo -e "  ${GREEN}✓ Jupyter Lab installed${NC}"
+            echo -e "  ${GREEN}✓ hpc_jupyter environment created with Jupyter Lab${NC}"
+        else
+            echo -e "  ${RED}✗ Failed to create hpc_jupyter environment. Check manually.${NC}"
+            return
+        fi
+    elif [ "$env_status" = "NO_JUPYTER" ]; then
+        status_done "  $(echo -e "${YELLOW}! Jupyter not found in hpc_jupyter. Installing...${NC}")"
+        ssh hpc 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; conda install -y -n hpc_jupyter jupyterlab' 2>/dev/null
+        if [ $? -eq 0 ]; then
+            echo -e "  ${GREEN}✓ Jupyter Lab installed in hpc_jupyter${NC}"
         else
             echo -e "  ${RED}✗ Failed to install Jupyter. Check manually.${NC}"
             return
         fi
     else
-        status_done "  $(echo -e "${GREEN}✓${NC} Jupyter available")"
+        status_done "  $(echo -e "${GREEN}✓${NC} hpc_jupyter ready")"
     fi
 
     JOBID=$(ssh hpc bash -s "$cores" "$wall" << 'REMOTE'
@@ -752,6 +761,7 @@ source /etc/profile.d/modules.sh
 module purge
 module load python/anaconda3
 eval "\$(conda shell.bash hook)"
+conda activate hpc_jupyter
 
 JUPYTER_PORT=\$(shuf -i 10000-60000 -n 1)
 jupyter lab --ip=0.0.0.0 --no-browser --port=\${JUPYTER_PORT}
@@ -1320,16 +1330,19 @@ duration_to_minutes() {
 welcome() {
     local fact="${FUN_FACTS[$((RANDOM % ${#FUN_FACTS[@]}))]}"
     echo ""
-    echo -e "${BLUE}╔══════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║${NC} ${BOLD} ██████╗ ██████╗ ███╗   ██╗██╗   ██╗${NC}               ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC} ${BOLD}██╔════╝██╔═══██╗████╗  ██║██║   ██║${NC}               ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC} ${BOLD}██║     ██║   ██║██╔██╗ ██║██║   ██║${NC}               ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC} ${BOLD}██║     ██║   ██║██║╚██╗██║╚██╗ ██╔╝${NC}               ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC} ${BOLD}╚██████╗╚██████╔╝██║ ╚████║ ╚████╔╝${NC}               ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC} ${BOLD} ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝  ╚═══╝${NC}               ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   ${DIM}CONVERGENCE · LIP6 GPU Cluster Manager${NC}         ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   ${DIM}10 nodes | 40 x A100 80GB GPUs | SLURM${NC}        ${BLUE}║${NC}"
-    echo -e "${BLUE}╚══════════════════════════════════════════════════════╝${NC}"
+    echo -e "${BLUE}┌──────────────────────────────────────────────────────┐${NC}"
+    echo -e "${BLUE}│${NC}                                                      ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN} ██████╗ ██████╗ ███╗   ██╗██╗   ██╗${NC}               ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN}██╔════╝██╔═══██╗████╗  ██║██║   ██║${NC}               ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN}██║     ██║   ██║██╔██╗ ██║██║   ██║${NC}               ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN}██║     ██║   ██║██║╚██╗██║╚██╗ ██╔╝${NC}               ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN}╚██████╗╚██████╔╝██║ ╚████║ ╚████╔╝${NC}               ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}  ${BOLD}${CYAN} ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝  ╚═══╝${NC}               ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}                                                      ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}   ${GREEN}CONVERGENCE${NC} ${DIM}· LIP6 GPU Cluster Manager${NC}         ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}   ${DIM}10 nodes  ·  4x A100 80GB  ·  SLURM${NC}            ${BLUE}│${NC}"
+    echo -e "${BLUE}│${NC}                                                      ${BLUE}│${NC}"
+    echo -e "${BLUE}└──────────────────────────────────────────────────────┘${NC}"
     echo ""
     echo -e "  ${CYAN}💡 ${fact}${NC}"
 }
