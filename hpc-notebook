@@ -137,12 +137,11 @@ launch_session() {
         return
     fi
 
-    JOBID=$(ssh hpc bash -s "$cores" "$wall" << 'REMOTE'
+    JOBID=$(ssh hpc bash --login -s "$cores" "$wall" << 'REMOTE'
 CORES="$1"
 WALL="$2"
 
 # Ensure hpc_jupyter conda env exists with Jupyter
-source /etc/profile.d/modules.sh
 module purge
 module load python/anaconda3
 eval "$(conda shell.bash hook)"

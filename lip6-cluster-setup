@@ -735,10 +735,10 @@ launch_session() {
 
     # Ensure hpc_jupyter conda env exists with Jupyter installed
     status_line "  ● Checking hpc_jupyter conda environment..."
-    env_status=$(ssh hpc 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; if conda env list 2>/dev/null | grep -q "hpc_jupyter"; then conda activate hpc_jupyter; if command -v jupyter &>/dev/null; then echo "READY"; else echo "NO_JUPYTER"; fi; else echo "NO_ENV"; fi' 2>/dev/null)
+    env_status=$(ssh hpc bash --login -c 'module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; if conda env list 2>/dev/null | grep -q "hpc_jupyter"; then conda activate hpc_jupyter; if command -v jupyter &>/dev/null; then echo "READY"; else echo "NO_JUPYTER"; fi; else echo "NO_ENV"; fi' 2>/dev/null)
     if [ "$env_status" = "NO_ENV" ]; then
         status_done "  $(echo -e "${YELLOW}! hpc_jupyter env not found. Creating...${NC}")"
-        ssh hpc 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; conda create -y -n hpc_jupyter python && conda install -y -n hpc_jupyter notebook jupyterlab'
+        ssh hpc bash --login -c 'module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; conda create -y -n hpc_jupyter python && conda install -y -n hpc_jupyter notebook jupyterlab'
         if [ $? -eq 0 ]; then
             echo -e "  ${GREEN}✓ hpc_jupyter environment created with Jupyter Lab${NC}"
         else
@@ -747,7 +747,7 @@ launch_session() {
         fi
     elif [ "$env_status" = "NO_JUPYTER" ]; then
         status_done "  $(echo -e "${YELLOW}! Jupyter not found in hpc_jupyter. Installing...${NC}")"
-        ssh hpc 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; conda install -y -n hpc_jupyter notebook jupyterlab'
+        ssh hpc bash --login -c 'module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; conda install -y -n hpc_jupyter notebook jupyterlab'
         if [ $? -eq 0 ]; then
             echo -e "  ${GREEN}✓ Jupyter Lab installed in hpc_jupyter${NC}"
         else
@@ -758,7 +758,7 @@ launch_session() {
         status_done "  $(echo -e "${GREEN}✓${NC} hpc_jupyter ready")"
     fi
 
-    JOBID=$(ssh hpc bash -s "$cores" "$wall" << 'REMOTE'
+    JOBID=$(ssh hpc bash --login -s "$cores" "$wall" << 'REMOTE'
 CORES="$1"
 WALL="$2"
 cat > ~/._jupyter_job.sh << JOBSCRIPT
