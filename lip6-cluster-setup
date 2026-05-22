@@ -1181,9 +1181,9 @@ done
 HPC_SCRIPT
 
     # Replace placeholders (use | delimiter to avoid issues with special chars)
-    ESCAPED_EMAIL=$(printf '%s\n' "$EMAIL" | sed 's/[&/\]/\\&/g')
-    sed -i "s|__USERNAME__|${USERNAME}|g" "${INSTALL_DIR}/hpc-notebook"
-    sed -i "s|__EMAIL__|${ESCAPED_EMAIL}|g" "${INSTALL_DIR}/hpc-notebook"
+    ESCAPED_EMAIL=$(printf '%s' "$EMAIL" | sed 's/[\\/&]/\\&/g')
+    sed "s|__USERNAME__|${USERNAME}|g; s|__EMAIL__|${ESCAPED_EMAIL}|g" "${INSTALL_DIR}/hpc-notebook" > "${INSTALL_DIR}/hpc-notebook.tmp" \
+        && mv "${INSTALL_DIR}/hpc-notebook.tmp" "${INSTALL_DIR}/hpc-notebook"
     chmod +x "${INSTALL_DIR}/hpc-notebook"
     echo -e "${GREEN}Installed:${NC} ~/hpc-notebook (alias: hpc)"
 fi
@@ -1912,9 +1912,9 @@ done
 CONV_SCRIPT
 
     # Replace placeholders (use | delimiter to avoid issues with special chars)
-    ESCAPED_EMAIL=$(printf '%s\n' "$EMAIL" | sed 's/[&/\]/\\&/g')
-    sed -i "s|__USERNAME__|${USERNAME}|g" "${INSTALL_DIR}/conv-manager"
-    sed -i "s|__EMAIL__|${ESCAPED_EMAIL}|g" "${INSTALL_DIR}/conv-manager"
+    ESCAPED_EMAIL=$(printf '%s' "$EMAIL" | sed 's/[\\/&]/\\&/g')
+    sed "s|__USERNAME__|${USERNAME}|g; s|__EMAIL__|${ESCAPED_EMAIL}|g" "${INSTALL_DIR}/conv-manager" > "${INSTALL_DIR}/conv-manager.tmp" \
+        && mv "${INSTALL_DIR}/conv-manager.tmp" "${INSTALL_DIR}/conv-manager"
     chmod +x "${INSTALL_DIR}/conv-manager"
     echo -e "${GREEN}Installed:${NC} ~/conv-manager (alias: conv)"
 fi
