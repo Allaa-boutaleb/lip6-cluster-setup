@@ -55,10 +55,13 @@ conv_template_header=$(awk '
 ' lip6-cluster-setup)
 printf '%s\n' "$conv_template_header" | grep -q '^is_mem()'
 printf '%s\n' "$conv_template_header" | grep -q '^slurm_options()'
+grep -q '~/.venvs/conv_jupyter/bin/jupyter' lip6-cluster-setup
+grep -q 'source ~/.venvs/conv_jupyter/bin/activate' lip6-cluster-setup
 
 assert_not_contains 'CPU_FEATURE=""' conv-manager
 assert_not_contains 'CPU vendor.*Auto\|)  Auto' conv-manager
 assert_not_contains 'CPU_FEATURE=""' lip6-cluster-setup
 assert_not_contains 'CPU vendor.*Auto\|)  Auto' lip6-cluster-setup
+assert_not_contains 'pip install --quiet jupyterlab' lip6-cluster-setup
 
 echo "ok"

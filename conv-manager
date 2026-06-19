@@ -238,6 +238,7 @@ source /etc/profile.d/modules.sh
 module purge
 module load python/anaconda3
 eval "\$(conda shell.bash hook)"
+source ~/.venvs/conv_jupyter/bin/activate
 
 JUPYTER_PORT=\$(shuf -i 10000-60000 -n 1)
 jupyter lab --ip=0.0.0.0 --no-browser --port=\${JUPYTER_PORT}

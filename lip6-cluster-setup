@@ -1526,12 +1526,12 @@ launch_session() {
     echo ""
     echo -e "${CYAN}Submitting Jupyter Lab: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
 
-    # Check if Jupyter is available
+    # Check if Jupyter is available in a user-owned env on the shared home.
     status_line "  ● Checking Jupyter installation..."
-    jupyter_check=$(ssh conv 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; which jupyter 2>/dev/null' 2>/dev/null)
+    jupyter_check=$(ssh conv 'test -x ~/.venvs/conv_jupyter/bin/jupyter && echo ok' 2>/dev/null)
     if [ -z "$jupyter_check" ]; then
         status_done "  $(echo -e "${YELLOW}! Jupyter not found. Installing...${NC}")"
-        ssh conv 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; eval "$(conda shell.bash hook)"; pip install --quiet jupyterlab' 2>/dev/null
+        ssh conv 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; python -m venv ~/.venvs/conv_jupyter && ~/.venvs/conv_jupyter/bin/python -m pip install --quiet --upgrade pip jupyterlab' 2>/dev/null
         if [ $? -eq 0 ]; then
             echo -e "  ${GREEN}✓ Jupyter Lab installed${NC}"
         else
@@ -1570,6 +1570,7 @@ source /etc/profile.d/modules.sh
 module purge
 module load python/anaconda3
 eval "\$(conda shell.bash hook)"
+source ~/.venvs/conv_jupyter/bin/activate
 
 JUPYTER_PORT=\$(shuf -i 10000-60000 -n 1)
 jupyter lab --ip=0.0.0.0 --no-browser --port=\${JUPYTER_PORT}
