@@ -83,7 +83,7 @@ When you choose option **1**, you'll be guided through:
 2. **GPU count** — How many GPUs (default: 1, max 4 per node for full, 8 for MIG)
 3. **Duration** — How long you need (default: 8 hours, max 15 days)
 4. **Job name** — A name for your job (default: `gpu-session`)
-5. **CPU vendor** — Auto, Intel (`--constraint=intel`), or AMD (`--constraint=amd`)
+5. **CPU vendor** — Intel (`--constraint=intel`) or AMD (`--constraint=amd`)
 6. **RAM size** — Optional Slurm `--mem` value such as `128G`, `512G`, `2048000M`, or `0`
 7. **Work mode:**
    - **Jupyter Lab** — Submits a batch job, waits for it to start, opens Jupyter in your browser

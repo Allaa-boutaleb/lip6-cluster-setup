@@ -26,6 +26,15 @@ assert_eq() {
     fi
 }
 
+assert_not_contains() {
+    local pattern="$1"
+    local file="$2"
+    if grep -q "$pattern" "$file"; then
+        echo "FAIL: $file contains $pattern" >&2
+        exit 1
+    fi
+}
+
 is_mem 512G
 is_mem 512g
 is_mem 2048000M
@@ -46,5 +55,10 @@ conv_template_header=$(awk '
 ' lip6-cluster-setup)
 printf '%s\n' "$conv_template_header" | grep -q '^is_mem()'
 printf '%s\n' "$conv_template_header" | grep -q '^slurm_options()'
+
+assert_not_contains 'CPU_FEATURE=""' conv-manager
+assert_not_contains 'CPU vendor.*Auto\|)  Auto' conv-manager
+assert_not_contains 'CPU_FEATURE=""' lip6-cluster-setup
+assert_not_contains 'CPU vendor.*Auto\|)  Auto' lip6-cluster-setup
 
 echo "ok"

@@ -1440,22 +1440,20 @@ launch_session() {
 
     echo ""
     echo -e "${BOLD}CPU vendor?${NC}"
-    echo -e "  ${GREEN}1${NC})  Auto"
-    echo -e "  ${GREEN}2${NC})  Intel"
-    echo -e "  ${GREEN}3${NC})  AMD"
+    echo -e "  ${GREEN}1${NC})  Intel"
+    echo -e "  ${GREEN}2${NC})  AMD"
     echo -e "  ${CYAN}0${NC})  Back"
     echo ""
     read -p "> " cpu_choice
     [ "$cpu_choice" = "0" ] && return
     cpu_choice="${cpu_choice:-1}"
     case $cpu_choice in
-        1) CPU_FEATURE="" ;;
-        2) CPU_FEATURE="intel" ;;
-        3) CPU_FEATURE="amd" ;;
-        *) echo -e "${RED}Choose 1, 2, 3, or 0.${NC}"; return ;;
+        1) CPU_FEATURE="intel" ;;
+        2) CPU_FEATURE="amd" ;;
+        *) echo -e "${RED}Choose 1, 2, or 0.${NC}"; return ;;
     esac
     if [ "$GPU_TYPE" = "a100_3g.40gb" ] && [ "$CPU_FEATURE" = "amd" ]; then
-        echo -e "${RED}AMD is only available on the full A100 node. Choose A100 80GB full or use Auto/Intel.${NC}"
+        echo -e "${RED}AMD is only available on the full A100 node. Choose A100 80GB full or Intel.${NC}"
         return
     fi
 
