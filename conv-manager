@@ -28,6 +28,17 @@ is_int()  { [[ "$1" =~ ^[0-9]+$ ]]; }
 is_wall() { [[ "$1" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; }
 is_name() { [[ "$1" =~ ^[a-zA-Z0-9_.-]+$ ]]; }
 is_path() { [[ "$1" =~ ^[a-zA-Z0-9_.~/-]+$ ]]; }
+is_mem()  { [[ "$1" =~ ^[0-9]+([KkMmGgTt])?$ ]]; }
+
+slurm_options() {
+    local cpu_feature="$1"
+    local memory="$2"
+    local opts=""
+    memory=$(printf '%s' "$memory" | tr '[:lower:]' '[:upper:]')
+    [ -n "$cpu_feature" ] && opts="${opts} --constraint=${cpu_feature}"
+    [ -n "$memory" ] && opts="${opts} --mem=${memory}"
+    echo "$opts"
+}
 
 FUN_FACTS=(
     "The first neural network (Perceptron) was built in 1958 by Frank Rosenblatt."
@@ -140,6 +151,34 @@ launch_session() {
     fi
 
     echo ""
+    echo -e "${BOLD}CPU vendor?${NC}"
+    echo -e "  ${GREEN}1${NC})  Auto"
+    echo -e "  ${GREEN}2${NC})  Intel"
+    echo -e "  ${GREEN}3${NC})  AMD"
+    echo ""
+    read -p "> " cpu_choice
+    cpu_choice="${cpu_choice:-1}"
+    case $cpu_choice in
+        1) CPU_FEATURE="" ;;
+        2) CPU_FEATURE="intel" ;;
+        3) CPU_FEATURE="amd" ;;
+        *) echo -e "${RED}Choose 1, 2, or 3.${NC}"; return ;;
+    esac
+    if [ "$GPU_TYPE" = "a100_3g.40gb" ] && [ "$CPU_FEATURE" = "amd" ]; then
+        echo -e "${RED}AMD is only available on the full A100 node. Choose A100 80GB full or use Auto/Intel.${NC}"
+        return
+    fi
+
+    echo ""
+    echo -e "${BOLD}RAM size?${NC}"
+    echo -e "  ${DIM}Press Enter for Slurm default. Examples: 128G, 512G, 2048000M, 0 for full node memory${NC}"
+    read -p "> " MEMORY
+    if [ -n "$MEMORY" ] && ! is_mem "$MEMORY"; then
+        echo -e "${RED}Invalid RAM size. Examples: 128G, 512G, 2048000M, or 0.${NC}"
+        return
+    fi
+
+    echo ""
     echo -e "${BOLD}How do you want to work?${NC}"
     echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
     echo -e "  ${GREEN}2${NC})  Terminal only (SSH into compute node)"
@@ -154,9 +193,11 @@ launch_session() {
     fi
 
     if [ "$mode" = "4" ]; then
-        submit_custom "$num_gpus" "$wall" "$job_name"
+        submit_custom "$num_gpus" "$wall" "$job_name" "$CPU_FEATURE" "$MEMORY"
         return
     fi
+
+    SLURM_EXTRA=$(slurm_options "$CPU_FEATURE" "$MEMORY")
 
     if [ "$mode" = "2" ]; then
         echo ""
@@ -164,24 +205,32 @@ launch_session() {
         echo -e "${DIM}This is interactive — dies when you disconnect.${NC}"
         echo -e "${DIM}Use option 1 or 3 for persistent Jupyter sessions.${NC}"
         echo ""
-        ssh -t conv "salloc --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'"
+        ssh -t conv "salloc --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA}"
         return
     fi
 
     echo ""
     echo -e "${CYAN}Submitting Jupyter Lab: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
 
-    JOBID=$(ssh conv bash -s "$num_gpus" "$GPU_TYPE" "$wall" "$job_name" << 'REMOTE'
+    JOBID=$(ssh conv bash -s "$num_gpus" "$GPU_TYPE" "$wall" "$job_name" "$CPU_FEATURE" "$MEMORY" << 'REMOTE'
 NUM_GPUS="$1"
 GPU_TYPE="$2"
 WALL="$3"
 JOB_NAME="$4"
+CPU_FEATURE="$5"
+MEMORY="$6"
+CONSTRAINT_LINE=""
+MEMORY_LINE=""
+[ -n "$CPU_FEATURE" ] && CONSTRAINT_LINE="#SBATCH --constraint=${CPU_FEATURE}"
+[ -n "$MEMORY" ] && MEMORY_LINE="#SBATCH --mem=${MEMORY}"
 cat > ~/._conv_jupyter.sh << JOBSCRIPT
 #!/bin/bash
 #SBATCH --job-name=${JOB_NAME}
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=${GPU_TYPE}:${NUM_GPUS}
 #SBATCH --time=${WALL}
+${CONSTRAINT_LINE}
+${MEMORY_LINE}
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=allaa.boutaleb@lip6.fr
 #SBATCH --output=%x-%j.out
@@ -243,6 +292,8 @@ submit_custom() {
     local num_gpus="$1"
     local wall="$2"
     local job_name="$3"
+    local cpu_feature="$4"
+    local memory="$5"
 
     echo ""
     echo -e "${BOLD}Path to your script on the cluster?${NC}"
@@ -261,7 +312,8 @@ submit_custom() {
     echo ""
     echo -e "${CYAN}Submitting ${script_path}: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
 
-    JOBID=$(ssh conv "sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}' --mail-type=ALL --mail-user=allaa.boutaleb@lip6.fr --output=%x-%j.out --error=%x-%j.err '${script_path}' 2>&1 | grep -oP 'Submitted batch job \K[0-9]+'")
+    SLURM_EXTRA=$(slurm_options "$cpu_feature" "$memory")
+    JOBID=$(ssh conv "sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA} --mail-type=ALL --mail-user=allaa.boutaleb@lip6.fr --output=%x-%j.out --error=%x-%j.err '${script_path}' 2>&1 | grep -oP 'Submitted batch job \K[0-9]+'")
 
     if [ -z "$JOBID" ] || ! is_int "$JOBID"; then
         echo -e "${RED}Failed to submit job.${NC}"
