@@ -236,7 +236,7 @@ connect_to_job() {
 
     # Parse actual port from Jupyter URL
     local remote_port
-    remote_port=$(echo "$url" | grep -oP ':\K[0-9]+(?=/)' | head -1)
+    remote_port=$(printf '%s\n' "$url" | sed -n 's|.*:\([0-9][0-9]*\)/.*|\1|p' | head -1)
     if ! is_int "$remote_port"; then
         echo -e "${RED}Could not determine Jupyter port.${NC}"
         return

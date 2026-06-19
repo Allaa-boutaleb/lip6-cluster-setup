@@ -422,7 +422,15 @@ fi
         echo "Host conv"
         echo "    HostName front.convergence.lip6.fr"
         echo "    User $USERNAME"
-        echo "    ProxyJump lip6"
+        echo "    IdentityFile $SSH_KEY"
+        echo "    IdentitiesOnly yes"
+        echo "    ServerAliveInterval 60"
+        echo "    ServerAliveCountMax 3"
+        echo "    StrictHostKeyChecking accept-new"
+        echo ""
+        echo "Host front.convergence.lip6.fr"
+        echo "    User $USERNAME"
+        echo "    ProxyJump none"
         echo "    IdentityFile $SSH_KEY"
         echo "    IdentitiesOnly yes"
         echo "    ServerAliveInterval 60"
@@ -576,13 +584,19 @@ FUN_FACTS=(
 # Accepts: 30m, 8h, 3d, 3d 12h, 1d 6h 30m, H:M:S, bare number (hours)
 # Outputs OAR-compatible H:M:S to stdout. Returns 1 on invalid input.
 parse_duration() {
-    local input="${*,,}"  # lowercase
-    input=$(echo "$input" | xargs)  # trim
+    local input
+    input=$(printf '%s' "$*" | tr '[:upper:]' '[:lower:]')
+    input=$(printf '%s' "$input" | xargs)  # trim
     [ -z "$input" ] && return 1
 
     # Legacy H:M:S format
     if [[ "$input" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
-        echo "$input"
+        local h m s
+        IFS=':' read -r h m s <<< "$input"
+        h=$((10#$h))
+        m=$((10#$m))
+        s=$((10#$s))
+        printf "%d:%d:%d\n" "$h" "$m" "$s"
         return 0
     fi
 
@@ -898,7 +912,7 @@ connect_to_job() {
     fi
 
     local remote_port
-    remote_port=$(echo "$url" | grep -oP ':\K[0-9]+(?=/)' | head -1)
+    remote_port=$(printf '%s\n' "$url" | sed -n 's|.*:\([0-9][0-9]*\)/.*|\1|p' | head -1)
     if ! is_int "$remote_port"; then
         echo -e "${RED}Could not determine Jupyter port.${NC}"
         return
@@ -1255,14 +1269,18 @@ FUN_FACTS=(
 # Accepts: 30m, 8h, 3d, 3d 12h, 1d 6h 30m, HH:MM:SS, bare number (hours)
 # Outputs SLURM-compatible time (HH:MM:SS or D-HH:MM:SS) to stdout.
 parse_duration() {
-    local input="${*,,}"  # lowercase
-    input=$(echo "$input" | xargs)  # trim
+    local input
+    input=$(printf '%s' "$*" | tr '[:upper:]' '[:lower:]')
+    input=$(printf '%s' "$input" | xargs)  # trim
     [ -z "$input" ] && return 1
 
     # Legacy H:M:S / HH:MM:SS format
     if [[ "$input" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
         local h m s
         IFS=':' read -r h m s <<< "$input"
+        h=$((10#$h))
+        m=$((10#$m))
+        s=$((10#$s))
         if [ "$h" -ge 24 ]; then
             local d=$(( h / 24 ))
             local rem_h=$(( h % 24 ))
@@ -1311,13 +1329,17 @@ parse_duration() {
 
 # Total minutes from raw duration input (for limit checks)
 duration_to_minutes() {
-    local input="${*,,}"
-    input=$(echo "$input" | xargs)
+    local input
+    input=$(printf '%s' "$*" | tr '[:upper:]' '[:lower:]')
+    input=$(printf '%s' "$input" | xargs)
     [ -z "$input" ] && echo "0" && return
 
     if [[ "$input" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
         local h m s
         IFS=':' read -r h m s <<< "$input"
+        h=$((10#$h))
+        m=$((10#$m))
+        s=$((10#$s))
         echo $(( h * 60 + m ))
         return
     fi
@@ -1694,7 +1716,8 @@ connect_to_job() {
         return
     fi
 
-    local remote_port=$(echo "$url" | grep -oP ':\K[0-9]+(?=/)' | head -1)
+    local remote_port
+    remote_port=$(printf '%s\n' "$url" | sed -n 's|.*:\([0-9][0-9]*\)/.*|\1|p' | head -1)
     if ! is_int "$remote_port"; then
         echo -e "${RED}Could not determine Jupyter port.${NC}"
         return
