@@ -34,7 +34,7 @@ The interactive wizard handles everything automatically:
 | **Key distribution** | Copies your public key to the gateway, HPC, and Convergence login nodes |
 | **Manager scripts** | Installs `~/hpc-notebook` and `~/conv-manager` on your local machine |
 | **Shell aliases** | Adds `hpc` and `conv` aliases to your shell (bash, zsh, or fish) |
-| **Remote config** | Configures `.bashrc` on the clusters with helpful aliases |
+| **Remote config** | Adds removable marked `.bashrc` blocks with helpful aliases |
 
 After setup, you have two commands:
 
@@ -43,6 +43,15 @@ After setup, you have two commands:
 | `hpc` | HPC | OAR | Up to 48 cores, 128GB RAM |
 | `conv` | Convergence | SLURM | A100 80GB / 40GB MIG GPUs |
 
+Health and repair commands are available without rerunning the wizard:
+
+```bash
+./lip6-cluster-setup doctor
+./lip6-cluster-setup doctor --remote
+./lip6-cluster-setup repair-login
+./lip6-cluster-setup uninstall --remote-blocks
+```
+
 ---
 
 ## Convergence Manager (`conv`)
@@ -50,28 +59,27 @@ After setup, you have two commands:
 The GPU cluster manager for running deep learning workloads on NVIDIA A100 GPUs.
 
 ```
-╔══════════════════════════════════════════════════════╗
-║  ██████╗ ██████╗ ███╗   ██╗██╗   ██╗               ║
-║ ██╔════╝██╔═══██╗████╗  ██║██║   ██║               ║
-║ ██║     ██║   ██║██╔██╗ ██║██║   ██║               ║
-║ ██║     ██║   ██║██║╚██╗██║╚██╗ ██╔╝               ║
-║ ╚██████╗╚██████╔╝██║ ╚████║ ╚████╔╝                ║
-║  ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝  ╚═══╝                ║
-║   CONVERGENCE · LIP6 GPU Cluster Manager            ║
-║   10 nodes | 40 x A100 80GB GPUs | SLURM            ║
-╚══════════════════════════════════════════════════════╝
+   _________  _   ____   __
+  / ___/ __ \| | / / /  / /
+ / /__/ /_/ /| |/ / /__/ /
+ \___/\____/ |___/____/_/
+
+  CONVERGENCE · LIP6 GPU Cockpit · Slurm · A100
+
+  ok front reachable
+  ok jobs: 2 running / 1 pending · tunnels: 1
+  ok GPU status available with option 4
 
   💡 The first neural network was built in 1958 by Frank Rosenblatt.
 
 What do you want to do?
 
-  1)  Launch a new GPU session
-  2)  Reconnect to a running session
-  3)  View my jobs
-  4)  Cancel jobs
-  5)  Cluster status (GPUs, nodes)
+  1)  Start smart GPU session
+  2)  Reconnect to running session
+  3)  Jobs and logs
+  4)  Cluster status
+  5)  Cleanup jobs or tunnels
   6)  SSH into login node
-  7)  Disconnect tunnel
   q)  Quit
 ```
 
@@ -85,11 +93,17 @@ When you choose option **1**, you'll be guided through:
 4. **Job name** — A name for your job (default: `gpu-session`)
 5. **CPU vendor** — Intel (`--constraint=intel`) or AMD (`--constraint=amd`)
 6. **RAM size** — Optional Slurm `--mem` value such as `128G`, `512G`, `2048000M`, or `0`
-7. **Work mode:**
+7. **Exact node** — Optional `--nodelist=nodeXX`; press Enter to let Slurm choose
+8. **Work mode:**
    - **Jupyter Lab** — Submits a batch job, waits for it to start, opens Jupyter in your browser
    - **Terminal only** — Interactive SSH session directly on a compute node (dies on disconnect)
    - **Both** — Jupyter Lab + shows you the SSH command for terminal access
    - **Custom script** — Submits your own batch script with GPU allocation
+
+Exact node selection is guarded:
+- Full A100 jobs accept `node01` through `node06`
+- MIG jobs accept `node07` through `node10`
+- Press Enter to skip this and let Slurm choose
 
 ### Reconnecting to a Running Session
 
@@ -106,26 +120,26 @@ Option **5** shows real-time GPU availability across all nodes — which GPUs ar
 The CPU cluster manager for running compute-heavy jobs on the OAR scheduler.
 
 ```
-╔══════════════════════════════════════════════╗
-║  ██╗  ██╗██████╗  ██████╗                   ║
-║  ██║  ██║██╔══██╗██╔════╝                   ║
-║  ███████║██████╔╝██║                        ║
-║  ██╔══██║██╔═══╝ ██║                        ║
-║  ██║  ██║██║     ╚██████╗                   ║
-║  ╚═╝  ╚═╝╚═╝      ╚═════╝                  ║
-║   LIP6 HPC Cluster Manager                  ║
-╚══════════════════════════════════════════════╝
+  __  ______  ______
+ / / / / __ \/ ____/
+/ /_/ / /_/ / /
+\____/ .___/_/
+    /_/
+
+  HPC · LIP6 CPU Cockpit · OAR
+
+  ok login reachable
+  ok jobs: 1 active · tunnels: 0
 
   💡 Linux runs on 100% of the world's top 500 supercomputers.
 
 What do you want to do?
 
-  1)  Launch a new session
-  2)  Reconnect to a running session
-  3)  View my jobs
-  4)  Cancel jobs
+  1)  Start CPU session
+  2)  Reconnect to running session
+  3)  Jobs and logs
+  4)  Cleanup jobs or tunnels
   5)  SSH into login node
-  6)  Disconnect tunnel
   q)  Quit
 ```
 
@@ -150,7 +164,7 @@ When you connect to a Jupyter session, the SSH tunnel runs **in the background**
 - **Ctrl+C won't break anything** — the tunnel persists independently
 - You can keep using the same terminal for other things
 
-Use the **Disconnect tunnel** menu option (option 7 on conv, option 6 on HPC) to see active tunnels and sever them when you're done.
+Use the **Cleanup jobs or tunnels** menu option to see active tunnels and sever them when you're done.
 
 ### Random Port Assignment
 
@@ -202,10 +216,26 @@ PENDING
 
 ### Spinner & Loading Indicators
 
-- The setup wizard shows `● Working...` → `✓ Done` on each step
-- Job wait loops show a spinner: `⠹ PENDING — waiting for resources (45s)`
+- The managers show compact status probes before the action menu
+- Job wait loops print queue state while waiting
 - SSH operations show `Loading, please wait...` so you know it's working
 - Press **Ctrl+C** while waiting for a job to queue — you'll get an email when it starts and can reconnect later
+
+### Login Safety
+
+Remote `.bashrc` edits are installed as marked blocks:
+
+```bash
+# BEGIN LIP6 Convergence Cluster Aliases
+# END LIP6 Convergence Cluster Aliases
+```
+
+The setup never installs persistent auto-SSH hooks from `.bashrc`. If login gets weird, use:
+
+```bash
+./lip6-cluster-setup doctor --remote
+./lip6-cluster-setup repair-login
+```
 
 ---
 
@@ -248,6 +278,7 @@ That's it — the `conv` and `hpc` aliases already point to these files.
 
 ```bash
 ./lip6-cluster-setup --reset
+./lip6-cluster-setup uninstall --remote-blocks
 ```
 
 Two options are offered:
@@ -256,6 +287,7 @@ Two options are offered:
 |------|-----------------|
 | **Local only** | `~/hpc-notebook`, `~/conv-manager`, SSH config entries, shell aliases |
 | **Full reset** | Everything above + restores `.bashrc` on HPC and Convergence from backup |
+| **Remote blocks only** | Removes only the managed LIP6 alias blocks from remote `.bashrc` |
 
 SSH keys are **never deleted** — they're safe to keep.
 

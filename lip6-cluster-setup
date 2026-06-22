@@ -28,6 +28,97 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 status_line() { printf "\r\033[K%s" "$1"; }
 status_done() { printf "\r\033[K%s\n" "$1"; }
 
+remove_remote_block() {
+    local host="$1"
+    local marker="$2"
+    ssh -o ConnectTimeout=10 "$host" bash -s "$marker" << 'REMOTE'
+marker="$1"
+[ -f ~/.bashrc ] || exit 0
+tmp=$(mktemp ~/.bashrc.lip6.XXXXXX)
+awk -v begin="# BEGIN ${marker}" -v end="# END ${marker}" '
+    $0 == begin { skip=1; next }
+    $0 == end { skip=0; next }
+    !skip { print }
+' ~/.bashrc > "$tmp" && mv "$tmp" ~/.bashrc
+REMOTE
+}
+
+verify_remote_login() {
+    local host="$1"
+    ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" "echo ok" 2>/dev/null | grep -q ok
+}
+
+doctor() {
+    local remote=false
+    [ "$1" = "--remote" ] && remote=true
+    echo ""
+    echo -e "${BOLD}LIP6 setup doctor${NC}"
+    echo ""
+
+    [ -x "$HOME/conv-manager" ] && echo -e "  ${GREEN}ok${NC} ~/conv-manager" || echo -e "  ${YELLOW}--${NC} ~/conv-manager missing"
+    [ -x "$HOME/hpc-notebook" ] && echo -e "  ${GREEN}ok${NC} ~/hpc-notebook" || echo -e "  ${YELLOW}--${NC} ~/hpc-notebook missing"
+    [ -f "$HOME/.ssh/config.d/lip6" ] && echo -e "  ${GREEN}ok${NC} ~/.ssh/config.d/lip6" || echo -e "  ${YELLOW}--${NC} lip6 ssh config missing"
+
+    if $remote; then
+        for host in hpc conv; do
+            if verify_remote_login "$host"; then
+                echo -e "  ${GREEN}ok${NC} ${host} command-mode ssh"
+            else
+                echo -e "  ${YELLOW}--${NC} ${host} command-mode ssh unavailable"
+            fi
+        done
+    fi
+    echo ""
+}
+
+repair_login() {
+    local host="${1:-conv}"
+    echo ""
+    echo -e "${CYAN}Repairing remote login on ${host}...${NC}"
+    ssh -o ConnectTimeout=10 "$host" bash << 'REMOTE'
+set -e
+ts=$(date +%Y%m%d%H%M%S)
+mkdir -p ~/login-rescue
+[ -f ~/.ssh/rc ] && mv ~/.ssh/rc ~/login-rescue/ssh-rc.disabled.$ts
+rm -f ~/.codex-autojump-node07 ~/.codex-autojump-node07.disabled.* 2>/dev/null || true
+for marker in "LIP6 Convergence Cluster Aliases" "LIP6 HPC Aliases"; do
+    if [ -f ~/.bashrc ]; then
+        tmp=$(mktemp ~/.bashrc.lip6.XXXXXX)
+        awk -v begin="# BEGIN ${marker}" -v end="# END ${marker}" '
+            $0 == begin { skip=1; next }
+            $0 == end { skip=0; next }
+            !skip { print }
+        ' ~/.bashrc > "$tmp" && mv "$tmp" ~/.bashrc
+    fi
+done
+echo "Remote login repair complete. Backups, if any, are in ~/login-rescue."
+REMOTE
+    echo -e "${GREEN}Repair command finished.${NC}"
+}
+
+uninstall_remote_blocks() {
+    echo ""
+    echo -e "${CYAN}Removing managed remote .bashrc blocks...${NC}"
+    remove_remote_block hpc "LIP6 HPC Aliases" 2>/dev/null || true
+    remove_remote_block conv "LIP6 Convergence Cluster Aliases" 2>/dev/null || true
+    echo -e "${GREEN}Remote blocks removed where reachable.${NC}"
+}
+
+if [ "$1" = "doctor" ]; then
+    doctor "$2"
+    exit 0
+fi
+
+if [ "$1" = "repair-login" ]; then
+    repair_login "$2"
+    exit 0
+fi
+
+if [ "$1" = "uninstall" ] && [ "$2" = "--remote-blocks" ]; then
+    uninstall_remote_blocks
+    exit 0
+fi
+
 # ---- Reset mode ----
 
 if [ "$1" = "--reset" ] || [ "$1" = "--uninstall" ]; then
@@ -533,6 +624,8 @@ if $SETUP_HPC; then
     cat > "${INSTALL_DIR}/hpc-notebook" << 'HPC_SCRIPT'
 #!/bin/bash
 # HPC Manager for LIP6 Cluster
+# Allaa Boutaleb - __EMAIL__
+set -e
 
 BLUE='\033[1;34m'
 GREEN='\033[1;32m'
@@ -544,18 +637,19 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-HPC_USER="__USERNAME__"
 TUNNEL_DIR="/tmp/jupyter_tunnels_$(whoami)"
 mkdir -p "$TUNNEL_DIR" 2>/dev/null
 
-is_int()  { [[ "$1" =~ ^[0-9]+$ ]]; }
-is_name() { [[ "$1" =~ ^[a-zA-Z0-9_.-]+$ ]]; }
-is_path() { [[ "$1" =~ ^[a-zA-Z0-9_.~/-]+$ ]]; }
-find_free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'; }
+# Find a free local port for SSH tunneling
+find_free_port() {
+    python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'
+}
 
-status_line() { printf "\r\033[K%s" "$1"; }
-status_done() { printf "\r\033[K%s\n" "$1"; }
-spin_chars=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+# ---- Input validation ----
+
+is_int()  { [[ "$1" =~ ^[0-9]+$ ]]; }
+is_wall() { [[ "$1" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; }
+is_name() { [[ "$1" =~ ^[a-zA-Z0-9_.-]+$ ]]; }
 
 FUN_FACTS=(
     "The first neural network (Perceptron) was built in 1958 by Frank Rosenblatt."
@@ -582,14 +676,12 @@ FUN_FACTS=(
 
 # parse_duration INPUT
 # Accepts: 30m, 8h, 3d, 3d 12h, 1d 6h 30m, H:M:S, bare number (hours)
-# Outputs OAR-compatible H:M:S to stdout. Returns 1 on invalid input.
 parse_duration() {
     local input
     input=$(printf '%s' "$*" | tr '[:upper:]' '[:lower:]')
-    input=$(printf '%s' "$input" | xargs)  # trim
+    input=$(printf '%s' "$input" | xargs)
     [ -z "$input" ] && return 1
 
-    # Legacy H:M:S format
     if [[ "$input" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
         local h m s
         IFS=':' read -r h m s <<< "$input"
@@ -602,7 +694,6 @@ parse_duration() {
 
     local total_minutes=0
     local matched=false
-
     if [[ "$input" =~ [dhm] ]]; then
         if [[ "$input" =~ ([0-9]+)d ]]; then
             total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 1440 ))
@@ -616,9 +707,8 @@ parse_duration() {
             total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} ))
             matched=true
         fi
-        if ! $matched; then return 1; fi
+        $matched || return 1
     elif [[ "$input" =~ ^[0-9]+$ ]]; then
-        # Bare number = hours
         total_minutes=$(( input * 60 ))
     else
         return 1
@@ -627,35 +717,32 @@ parse_duration() {
     local hours=$(( total_minutes / 60 ))
     local mins=$(( total_minutes % 60 ))
     echo "${hours}:${mins}:0"
-    return 0
 }
 
-# Convert total minutes to human-readable string
-duration_human() {
-    local total_minutes="$1"
-    [ -z "$total_minutes" ] || [ "$total_minutes" -le 0 ] 2>/dev/null && { echo "N/A"; return; }
-    local d=$(( total_minutes / 1440 ))
-    local h=$(( (total_minutes % 1440) / 60 ))
-    local m=$(( total_minutes % 60 ))
-    local result=""
-    [ $d -gt 0 ] && result="${d}d "
-    [ $h -gt 0 ] && result="${result}${h}h "
-    [ $m -gt 0 ] && result="${result}${m}m"
-    echo "${result:-0m}" | xargs
+spinner_step() {
+    local label="$1"
+    printf "  ${DIM}%-2s %s...${NC}" ">" "$label"
 }
 
-welcome() {
-    local fact="${FUN_FACTS[$((RANDOM % ${#FUN_FACTS[@]}))]}"
+spinner_done() {
+    local text="$1"
+    printf "\r\033[K  ${GREEN}ok${NC} %s\n" "$text"
+}
+
+spinner_warn() {
+    local text="$1"
+    printf "\r\033[K  ${YELLOW}--${NC} %s\n" "$text"
+}
+
+render_header() {
     echo ""
     local art
     art=$(cat << 'EOF'
- _   _ ______  _____   _________ _____ _____ ___
-| | | || ___ \/  __ \ |  _| ___ \_   _|  __ \_  |
-| |_| || |_/ /| /  \/ | | | |_/ / | | | |  \/ | |
-|  _  ||  __/ | |     | | | ___ \ | | | | __  | |
-| | | || |    | \__/\ | | | |_/ /_| |_| |_\ \ | |
-\_| |_/\_|     \____/ | |_\____/ \___/ \____/_| |
-                      |___|                 |___|
+  __  ______  ______
+ / / / / __ \/ ____/
+/ /_/ / /_/ / /
+\____/ .___/_/
+    /_/
 EOF
     )
     while IFS= read -r line; do
@@ -663,30 +750,56 @@ EOF
         sleep 0.03
     done <<< "$art"
     echo ""
-    printf "  ${GREEN}HPC${NC} ${DIM}· LIP6 Cluster Manager · OAR${NC}\n"
+    printf "  ${GREEN}HPC${NC} ${DIM}· LIP6 CPU Cockpit · OAR${NC}\n"
+}
+
+render_status() {
+    echo ""
+    spinner_step "checking login"
+    if ssh -n -o BatchMode=yes -o ConnectTimeout=5 hpc "echo ok" 2>/dev/null | grep -q ok; then
+        spinner_done "login reachable"
+    else
+        spinner_warn "login unreachable"
+        return
+    fi
+
+    spinner_step "reading jobs"
+    local output jobs tunnels
+    output=$(ssh -n hpc "oarstat -u __USERNAME__ 2>/dev/null" 2>/dev/null || true)
+    jobs=$(printf '%s\n' "$output" | awk '/^[0-9]/{c++} END{print c+0}')
+    tunnels=$(find "$TUNNEL_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')
+    spinner_done "jobs: ${jobs} active · tunnels: ${tunnels}"
+}
+
+welcome() {
+    local fact="${FUN_FACTS[$((RANDOM % ${#FUN_FACTS[@]}))]}"
+    render_header
     echo ""
     printf "  ${DIM}💡 %s${NC}\n" "$fact"
 }
-show_menu() {
+
+print_action_menu() {
     echo ""
     echo -e "${BOLD}What do you want to do?${NC}"
     echo ""
-    echo -e "  ${GREEN}1${NC})  Launch a new session"
-    echo -e "  ${GREEN}2${NC})  Reconnect to a running session"
-    echo -e "  ${GREEN}3${NC})  View my jobs"
-    echo -e "  ${GREEN}4${NC})  Cancel jobs"
+    echo -e "  ${GREEN}1${NC})  Start CPU session"
+    echo -e "  ${GREEN}2${NC})  Reconnect to running session"
+    echo -e "  ${GREEN}3${NC})  Jobs and logs"
+    echo -e "  ${GREEN}4${NC})  Cleanup jobs or tunnels"
     echo -e "  ${GREEN}5${NC})  SSH into login node"
-    echo -e "  ${GREEN}6${NC})  Disconnect tunnel"
-    echo -e "  ${CYAN}0${NC})  Exit"
+    echo -e "  ${RED}q${NC})  Quit"
     echo ""
+}
+
+show_menu() {
+    print_action_menu
 }
 
 launch_session() {
     echo ""
     echo -e "${BOLD}How many cores?${NC}"
-    echo -e "  ${DIM}Press Enter for 24, or 0 to go back${NC}"
+    echo -e "  ${DIM}Press Enter for 24${NC}"
     read -p "> " cores
-    [ "$cores" = "0" ] && return
     cores="${cores:-24}"
     if ! is_int "$cores"; then
         echo -e "${RED}Core count must be a number (e.g. 4, 12, 24).${NC}"
@@ -695,61 +808,47 @@ launch_session() {
 
     echo ""
     echo -e "${BOLD}How long do you need?${NC}"
-    echo -e "  ${DIM}e.g. 8h, 3d, 1d 6h 30m, 24:0:0 — Enter for 24h, 0 to go back${NC}"
+    echo -e "  ${DIM}Press Enter for 24 hours. Examples: 8h, 1d 6h, 24:0:0${NC}"
     read -p "> " wall_input
-    [ "$wall_input" = "0" ] && return
     wall_input="${wall_input:-24h}"
-    wall=$(parse_duration "$wall_input")
-    if [ $? -ne 0 ] || [ -z "$wall" ]; then
-        echo -e "${RED}Invalid duration. Examples: 8h, 3d, 1d 6h 30m, 8:0:0${NC}"
+    wall=$(parse_duration "$wall_input") || {
+        echo -e "${RED}Invalid duration. Use 8h, 1d 6h, 30m, or H:M:S.${NC}"
         return
-    fi
-
-    # Duration warning
-    local wall_h=${wall%%:*}
-    if [ "$wall_h" -gt 24 ] 2>/dev/null; then
-        echo -e "${YELLOW}Note: Interactive sessions are typically limited to ~24h. Batch jobs can go up to 1000h.${NC}"
-    fi
+    }
 
     echo ""
     echo -e "${BOLD}How do you want to work?${NC}"
-    echo ""
-    echo -e "  ${GREEN}1${NC})  Jupyter Lab + Terminal  ${DIM}(recommended)${NC}"
-    echo -e "      ${DIM}Persistent — survives disconnect. Opens browser + shows SSH command.${NC}"
-    echo -e "  ${GREEN}2${NC})  Terminal only  ${DIM}(interactive)${NC}"
-    echo -e "      ${DIM}Direct shell on compute node. Ends when you disconnect.${NC}"
-    echo -e "  ${GREEN}3${NC})  Submit a custom script"
-    echo -e "      ${DIM}Run your own batch script with OAR.${NC}"
-    echo -e "  ${CYAN}0${NC})  Back"
+    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
+    echo -e "  ${GREEN}2${NC})  Terminal only (SSH into compute node)"
+    echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
     echo ""
     read -p "> " mode
-    [ "$mode" = "0" ] && return
     mode="${mode:-1}"
     if ! [[ "$mode" =~ ^[1-3]$ ]]; then
         echo -e "${RED}Choose 1, 2, or 3.${NC}"
         return
     fi
 
-    if [ "$mode" = "2" ]; then
-        echo ""
-        echo -e "${CYAN}Requesting interactive session: ${cores} cores, ${wall}...${NC}"
-        echo -e "${DIM}This is interactive — ends when you disconnect.${NC}"
-        echo ""
-        ssh -t hpc "oarsub -l /nodes=1/core=${cores},walltime=${wall} -p \"host like 'big%'\" -I"
-        return
-    fi
-
-    if [ "$mode" = "3" ]; then
-        submit_custom_hpc "$cores" "$wall"
-        return
-    fi
-
     echo ""
     echo -e "${CYAN}Submitting job: ${cores} cores, ${wall}...${NC}"
+    echo -e "${DIM}oarsub -l /nodes=1/core=${cores},walltime=${wall} -p \"host like 'big%'\"${NC}"
+
+    if [ "$mode" = "2" ]; then
+        echo ""
+        echo -e "${YELLOW}Terminal mode requires an interactive OAR session.${NC}"
+        echo -e "Opening SSH to the cluster..."
+        echo ""
+        echo -e "${DIM}Run this on the cluster:${NC}"
+        echo -e "  ${GREEN}oarsub -l /nodes=1/core=${cores},walltime=${wall} -p \"host like 'big%'\" -I${NC}"
+        echo ""
+        ssh hpc
+        return
+    fi
 
     JOBID=$(ssh hpc bash -s "$cores" "$wall" << 'REMOTE'
 CORES="$1"
 WALL="$2"
+
 cat > ~/._jupyter_job.sh << 'JOBSCRIPT'
 #!/bin/bash
 #OAR -l {host like 'big%'}/nodes=1/core=__CORES__,walltime=__WALL__
@@ -792,94 +891,32 @@ REMOTE
     echo -e "${GREEN}Job $JOBID submitted.${NC} Waiting for it to start..."
     sleep 5
 
-    # Trap Ctrl+C during wait
-    local wait_interrupted=false
-    trap 'wait_interrupted=true' INT
-
     local attempts=0
-    local spin_idx=0
     while true; do
-        if $wait_interrupted; then
-            status_done ""
-            echo ""
-            echo -e "${YELLOW}Job $JOBID is still queued. You'll get an email when it starts.${NC}"
-            echo -e "Use option 2 to reconnect later."
-            trap - INT
-            return
-        fi
         STATE=$(ssh hpc "oarstat -f -j '$JOBID' 2>/dev/null | grep 'state =' | head -1 | awk -F= '{print \$2}' | tr -d ' '")
         if [ "$STATE" = "Running" ]; then
-            status_done "  $(echo -e "${GREEN}✓ Job $JOBID is running${NC}")"
             break
         elif [ "$STATE" = "Error" ] || [ "$STATE" = "Terminated" ]; then
-            status_done ""
             echo -e "${RED}Job failed (state: $STATE)${NC}"
             echo -e "Check logs: ${DIM}ssh hpc 'cat ~/OAR.${JOBID}.stderr'${NC}"
-            trap - INT
             return
         fi
         attempts=$((attempts + 1))
         if [ $attempts -gt 60 ]; then
-            status_done ""
-            echo ""
-            echo -e "${YELLOW}Job $JOBID is still queued after 5 min. You'll get an email when it starts.${NC}"
-            echo -e "Use option 2 to reconnect later."
-            trap - INT
+            echo -e "${YELLOW}Still queued after 5 min. Job $JOBID is waiting for resources.${NC}"
+            echo -e "Use option 2 to connect later, or option 4 to cancel."
             return
         fi
-        local sc="${spin_chars[$((spin_idx % ${#spin_chars[@]}))]}"
-        spin_idx=$((spin_idx + 1))
-        status_line "  ${sc} ${STATE:-PENDING} — waiting for resources ($((attempts * 5))s) — Ctrl+C to stop waiting"
+        echo -e "  ${DIM}${STATE:-Queued}... ($((attempts * 5))s)${NC}"
         sleep 5
     done
 
-    trap - INT
-    connect_to_job "$JOBID" "$port"
-}
-
-submit_custom_hpc() {
-    local cores="$1"
-    local wall="$2"
-
-    echo ""
-    echo -e "${BOLD}Path to your script on the cluster?${NC}"
-    echo -e "  ${DIM}e.g. ~/train.sh — 0 to go back${NC}"
-    read -p "> " script_path
-    [ "$script_path" = "0" ] && return
-
-    if [ -z "$script_path" ]; then
-        echo -e "${RED}No script provided.${NC}"
-        return
-    fi
-    if ! is_path "$script_path"; then
-        echo -e "${RED}Invalid path. Allowed characters: letters, digits, ., _, ~, /, -${NC}"
-        return
-    fi
-
-    # Warn if > 1000h
-    local wall_h=${wall%%:*}
-    if [ "$wall_h" -gt 1000 ] 2>/dev/null; then
-        echo -e "${YELLOW}Warning: ${wall_h}h exceeds the typical 1000h batch limit.${NC}"
-    fi
-
-    echo ""
-    echo -e "${CYAN}Submitting ${script_path}: ${cores} cores, ${wall}...${NC}"
-
-    JOBID=$(ssh hpc "oarsub -l /nodes=1/core=${cores},walltime=${wall} -p \"host like 'big%'\" -S '${script_path}' 2>&1 | grep -oP 'OAR_JOB_ID=\K[0-9]+'")
-
-    if [ -z "$JOBID" ] || ! is_int "$JOBID"; then
-        echo -e "${RED}Failed to submit job.${NC}"
-        return
-    fi
-
-    echo -e "${GREEN}Job $JOBID submitted!${NC}"
-    echo -e "  Check status:  ${DIM}option 3${NC}"
-    echo -e "  Check logs:    ${DIM}ssh hpc 'cat ~/OAR.${JOBID}.stderr'${NC}"
-    echo -e "  Cancel:        ${DIM}option 4${NC}"
+    connect_to_job "$JOBID" "$mode"
 }
 
 connect_to_job() {
     local jobid="$1"
+    local mode="${2:-1}"
 
     local node
     node=$(ssh hpc "oarstat -f -j '$jobid' 2>/dev/null | grep 'assigned_hostnames' | awk '{print \$3}'")
@@ -891,26 +928,21 @@ connect_to_job() {
     echo -e "${CYAN}Running on ${BOLD}$node${NC}${CYAN}. Waiting for Jupyter...${NC}"
 
     local url=""
-    local spin_idx=0
     for i in $(seq 1 30); do
         url=$(ssh hpc "grep -o 'http://[^ ]*' ~/OAR.'${jobid}'.stderr 2>/dev/null | tail -1")
         if [ -n "$url" ]; then
-            status_done "  $(echo -e "${GREEN}✓${NC} Jupyter is ready")"
             break
         fi
-        local sc="${spin_chars[$((spin_idx % ${#spin_chars[@]}))]}"
-        spin_idx=$((spin_idx + 1))
-        status_line "  ${sc} Waiting for Jupyter to start... ($((i * 2))s)"
         sleep 2
     done
 
     if [ -z "$url" ]; then
-        status_done ""
         echo -e "${RED}Jupyter didn't start.${NC}"
         echo -e "Check logs: ${DIM}ssh hpc 'cat ~/OAR.${jobid}.stderr'${NC}"
         return
     fi
 
+    # Parse actual port from Jupyter URL
     local remote_port
     remote_port=$(printf '%s\n' "$url" | sed -n 's|.*:\([0-9][0-9]*\)/.*|\1|p' | head -1)
     if ! is_int "$remote_port"; then
@@ -931,6 +963,7 @@ connect_to_job() {
     echo -e "  ${BOLD}Node:${NC}  $node"
     echo -e "  ${BOLD}URL:${NC}   ${CYAN}$local_url${NC}"
     echo ""
+
     # Start tunnel in background
     ssh -N -L "${local_port}:${node}:${remote_port}" hpc &
     local tunnel_pid=$!
@@ -949,108 +982,39 @@ connect_to_job() {
     elif command -v open &>/dev/null; then
         open "$local_url" &
     fi
-    echo ""
-    echo -e "${BOLD}To open a terminal on $node, run in another tab:${NC}"
-    echo ""
-    echo -e "  ${GREEN}ssh -t hpc \"OAR_JOB_ID=$jobid oarsh $node\"${NC}"
+
+    if [ "$mode" = "3" ]; then
+        echo ""
+        echo -e "${BOLD}To open a terminal on $node, run in another tab:${NC}"
+        echo ""
+        echo -e "  ${GREEN}ssh -t hpc \"OAR_JOB_ID=$jobid oarsh $node\"${NC}"
+        echo ""
+        echo -e "${DIM}Or with Kitty:${NC}"
+        echo ""
+        echo -e "  ${GREEN}kitty +kitten ssh -t hpc \"OAR_JOB_ID=$jobid oarsh $node\"${NC}"
+    fi
 }
 
 my_jobs() {
     echo ""
-    status_line "  ● Fetching jobs..."
-    local raw
-    raw=$(ssh hpc "oarstat -u ${HPC_USER} -f 2>/dev/null" 2>/dev/null)
-    if [ -z "$raw" ] || ! echo "$raw" | grep -q "Job_Id"; then
-        status_done "  $(echo -e "${DIM}No jobs found.${NC}")"
+    echo -e "${DIM}Loading, please wait...${NC}"
+    local output
+    output=$(ssh hpc "oarstat -u __USERNAME__ 2>/dev/null")
+    if echo "$output" | grep -q "^[0-9]"; then
+        echo -e "${BOLD}Your jobs:${NC}"
         echo ""
-        return
-    fi
-
-    status_done ""
-
-    # Parse oarstat -f output
-    local current_id="" current_name="" current_state="" current_wall="" current_start="" current_node=""
-    local running_lines=()
-    local pending_lines=()
-
-    while IFS= read -r line; do
-        if [[ "$line" =~ Job_Id[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
-            # Save previous job
-            if [ -n "$current_id" ]; then
-                if [ "$current_state" = "Running" ]; then
-                    running_lines+=("${current_id}|${current_name}|${current_node}|${current_wall}|${current_start}")
-                elif [ -n "$current_state" ]; then
-                    pending_lines+=("${current_id}|${current_name}|${current_wall}")
-                fi
-            fi
-            current_id="${BASH_REMATCH[1]}"
-            current_name="" current_state="" current_wall="" current_start="" current_node=""
-        fi
-        [[ "$line" =~ name[[:space:]]*=[[:space:]]*(.*) ]] && current_name="${BASH_REMATCH[1]}" && current_name=$(echo "$current_name" | xargs)
-        [[ "$line" =~ state[[:space:]]*=[[:space:]]*(.*) ]] && current_state="${BASH_REMATCH[1]}" && current_state=$(echo "$current_state" | xargs)
-        [[ "$line" =~ walltime[[:space:]]*=[[:space:]]*(.*) ]] && current_wall="${BASH_REMATCH[1]}" && current_wall=$(echo "$current_wall" | xargs)
-        [[ "$line" =~ startTime[[:space:]]*=[[:space:]]*(.*) ]] && current_start="${BASH_REMATCH[1]}" && current_start=$(echo "$current_start" | xargs)
-        [[ "$line" =~ assigned_hostnames[[:space:]]*=[[:space:]]*(.*) ]] && current_node="${BASH_REMATCH[1]}" && current_node=$(echo "$current_node" | xargs)
-    done <<< "$raw"
-
-    # Don't forget the last job
-    if [ -n "$current_id" ]; then
-        if [ "$current_state" = "Running" ]; then
-            running_lines+=("${current_id}|${current_name}|${current_node}|${current_wall}|${current_start}")
-        elif [ -n "$current_state" ]; then
-            pending_lines+=("${current_id}|${current_name}|${current_wall}")
-        fi
-    fi
-
-    if [ ${#running_lines[@]} -gt 0 ]; then
-        echo -e "${GREEN}${BOLD}RUNNING${NC}"
-        printf "  %-10s %-15s %-10s %-12s %-12s\n" "ID" "Name" "Node" "Elapsed" "Remaining"
-        echo -e "  ${DIM}──────────────────────────────────────────────────────────────${NC}"
-        for entry in "${running_lines[@]}"; do
-            IFS='|' read -r jid jname jnode jwall jstart <<< "$entry"
-            # Compute elapsed and remaining
-            local start_ts elapsed_str remain_str
-            if [[ "$jstart" =~ ^[0-9]+$ ]]; then
-                start_ts="$jstart"
-            else
-                start_ts=$(date -d "$jstart" +%s 2>/dev/null)
-            fi
-            if [ -n "$start_ts" ] && [ "$start_ts" -gt 0 ] 2>/dev/null; then
-                local now_ts=$(date +%s)
-                local elapsed_min=$(( (now_ts - start_ts) / 60 ))
-                # Parse walltime H:M:S to minutes
-                local wh wm ws
-                IFS=':' read -r wh wm ws <<< "$jwall"
-                local wall_min=$(( wh * 60 + wm ))
-                local remain_min=$(( wall_min - elapsed_min ))
-                [ $remain_min -lt 0 ] && remain_min=0
-                elapsed_str=$(duration_human $elapsed_min)
-                remain_str=$(duration_human $remain_min)
-            else
-                elapsed_str="N/A"
-                remain_str="N/A"
-            fi
-            printf "  %-10s %-15s %-10s %-12s %-12s\n" "$jid" "${jname:0:15}" "${jnode:0:10}" "$elapsed_str" "$remain_str"
-        done
-    fi
-
-    if [ ${#pending_lines[@]} -gt 0 ]; then
-        [ ${#running_lines[@]} -gt 0 ] && echo ""
-        echo -e "${YELLOW}${BOLD}PENDING${NC}"
-        printf "  %-10s %-15s %-15s\n" "ID" "Name" "Requested Time"
-        echo -e "  ${DIM}──────────────────────────────────────────${NC}"
-        for entry in "${pending_lines[@]}"; do
-            IFS='|' read -r jid jname jwall <<< "$entry"
-            printf "  %-10s %-15s %-15s\n" "$jid" "${jname:0:15}" "$jwall"
-        done
+        echo "$output"
+    else
+        echo -e "${DIM}No running jobs.${NC}"
     fi
     echo ""
 }
 
 cancel_job() {
     echo ""
+    echo -e "${DIM}Loading, please wait...${NC}"
     local output
-    output=$(ssh hpc "oarstat -u ${HPC_USER} 2>/dev/null")
+    output=$(ssh hpc "oarstat -u __USERNAME__ 2>/dev/null")
     if ! echo "$output" | grep -q "^[0-9]"; then
         echo -e "${DIM}No running jobs to cancel.${NC}"
         return
@@ -1059,11 +1023,10 @@ cancel_job() {
     echo ""
     echo "$output"
     echo ""
-    echo -e "Enter a job ID to cancel, ${BOLD}all${NC} to cancel everything, or ${CYAN}0${NC} to go back."
+    echo -e "Enter a job ID to cancel, or ${BOLD}all${NC} to cancel everything."
     read -p "> " jobid
-    [ "$jobid" = "0" ] && return
     if [ "$jobid" = "all" ]; then
-        ssh hpc "for jid in \$(oarstat -u ${HPC_USER} 2>/dev/null | awk '/^[0-9]/{print \$1}'); do oardel \$jid; rm -f ~/OAR.\${jid}.stderr ~/OAR.\${jid}.stdout; echo \"Cancelled \$jid\"; done"
+        ssh hpc "for jid in \$(oarstat -u __USERNAME__ 2>/dev/null | awk '/^[0-9]/{print \$1}'); do oardel \$jid; rm -f ~/OAR.\${jid}.stderr ~/OAR.\${jid}.stdout; echo \"Cancelled \$jid\"; done"
         echo -e "${GREEN}All jobs cancelled and log files cleaned up.${NC}"
     elif is_int "$jobid"; then
         ssh hpc "oardel '$jobid'; rm -f ~/OAR.'${jobid}'.stderr ~/OAR.'${jobid}'.stdout"
@@ -1075,8 +1038,9 @@ cancel_job() {
 
 connect_existing() {
     echo ""
+    echo -e "${DIM}Loading, please wait...${NC}"
     local output
-    output=$(ssh hpc "oarstat -u ${HPC_USER} 2>/dev/null")
+    output=$(ssh hpc "oarstat -u __USERNAME__ 2>/dev/null")
     if ! echo "$output" | grep -q "^[0-9]"; then
         echo -e "${DIM}No running jobs to connect to.${NC}"
         return
@@ -1093,9 +1057,8 @@ connect_existing() {
         echo ""
         echo "$output"
         echo ""
-        echo -e "Enter the job ID to connect to (or ${CYAN}0${NC} to go back):"
+        echo -e "Enter the job ID you want to connect to:"
         read -p "> " jobid
-        [ "$jobid" = "0" ] && return
     fi
 
     if [ -z "$jobid" ]; then
@@ -1108,15 +1071,14 @@ connect_existing() {
 
     echo ""
     echo -e "${BOLD}How do you want to connect?${NC}"
-    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser + shows SSH command)"
+    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
     echo -e "  ${GREEN}2${NC})  Terminal only"
-    echo -e "  ${CYAN}0${NC})  Back"
+    echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
     echo ""
     read -p "> " mode
-    [ "$mode" = "0" ] && return
     mode="${mode:-1}"
-    if ! [[ "$mode" =~ ^[1-2]$ ]]; then
-        echo -e "${RED}Choose 1 or 2.${NC}"
+    if ! [[ "$mode" =~ ^[1-3]$ ]]; then
+        echo -e "${RED}Choose 1, 2, or 3.${NC}"
         return
     fi
 
@@ -1130,7 +1092,7 @@ connect_existing() {
         echo -e "${CYAN}Connecting to $node...${NC}"
         ssh -t hpc "OAR_JOB_ID='$jobid' oarsh '$node'"
     else
-        connect_to_job "$jobid"
+        connect_to_job "$jobid" "$mode"
     fi
 }
 
@@ -1177,18 +1139,21 @@ sever_tunnel() {
     fi
 }
 
+# Entry point
 welcome
+
 while true; do
+    echo ""
+    render_status
     show_menu
     read -p "> " choice
     case $choice in
         1) launch_session ;;
         2) connect_existing ;;
         3) my_jobs ;;
-        4) cancel_job ;;
+        4) cancel_job; sever_tunnel ;;
         5) ssh hpc ;;
-        6) sever_tunnel ;;
-        0) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
+        q|Q) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
         *) echo -e "${RED}Invalid choice.${NC}" ;;
     esac
 done
@@ -1207,6 +1172,8 @@ if $SETUP_CONV; then
     cat > "${INSTALL_DIR}/conv-manager" << 'CONV_SCRIPT'
 #!/bin/bash
 # Convergence GPU Cluster Manager for LIP6
+# Allaa Boutaleb - __EMAIL__
+set -e
 
 BLUE='\033[1;34m'
 GREEN='\033[1;32m'
@@ -1222,25 +1189,41 @@ CONV_USER="__USERNAME__"
 TUNNEL_DIR="/tmp/jupyter_tunnels_$(whoami)"
 mkdir -p "$TUNNEL_DIR" 2>/dev/null
 
+# Find a free local port for SSH tunneling
+find_free_port() {
+    python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'
+}
+
+# ---- Input validation ----
+
 is_int()  { [[ "$1" =~ ^[0-9]+$ ]]; }
+is_wall() { [[ "$1" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; }
 is_name() { [[ "$1" =~ ^[a-zA-Z0-9_.-]+$ ]]; }
 is_path() { [[ "$1" =~ ^[a-zA-Z0-9_.~/-]+$ ]]; }
 is_mem()  { [[ "$1" =~ ^[0-9]+([KkMmGgTt])?$ ]]; }
-find_free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'; }
+is_conv_node() { [[ "$1" =~ ^node(0[1-9]|10)$ ]]; }
+
+node_matches_gpu() {
+    local node="$1"
+    local gpu_type="$2"
+    case "$gpu_type" in
+        a100_7g.80gb) [[ "$node" =~ ^node0[1-6]$ ]] ;;
+        a100_3g.40gb) [[ "$node" =~ ^node(0[7-9]|10)$ ]] ;;
+        *) return 1 ;;
+    esac
+}
 
 slurm_options() {
     local cpu_feature="$1"
     local memory="$2"
+    local node="$3"
     local opts=""
     memory=$(printf '%s' "$memory" | tr '[:lower:]' '[:upper:]')
     [ -n "$cpu_feature" ] && opts="${opts} --constraint=${cpu_feature}"
     [ -n "$memory" ] && opts="${opts} --mem=${memory}"
+    [ -n "$node" ] && opts="${opts} --nodelist=${node}"
     echo "$opts"
 }
-
-status_line() { printf "\r\033[K%s" "$1"; }
-status_done() { printf "\r\033[K%s\n" "$1"; }
-spin_chars=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
 
 FUN_FACTS=(
     "The first neural network (Perceptron) was built in 1958 by Frank Rosenblatt."
@@ -1267,14 +1250,12 @@ FUN_FACTS=(
 
 # parse_duration INPUT
 # Accepts: 30m, 8h, 3d, 3d 12h, 1d 6h 30m, HH:MM:SS, bare number (hours)
-# Outputs SLURM-compatible time (HH:MM:SS or D-HH:MM:SS) to stdout.
 parse_duration() {
     local input
     input=$(printf '%s' "$*" | tr '[:upper:]' '[:lower:]')
-    input=$(printf '%s' "$input" | xargs)  # trim
+    input=$(printf '%s' "$input" | xargs)
     [ -z "$input" ] && return 1
 
-    # Legacy H:M:S / HH:MM:SS format
     if [[ "$input" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
         local h m s
         IFS=':' read -r h m s <<< "$input"
@@ -1293,7 +1274,6 @@ parse_duration() {
 
     local total_minutes=0
     local matched=false
-
     if [[ "$input" =~ [dhm] ]]; then
         if [[ "$input" =~ ([0-9]+)d ]]; then
             total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 1440 ))
@@ -1307,9 +1287,8 @@ parse_duration() {
             total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} ))
             matched=true
         fi
-        if ! $matched; then return 1; fi
+        $matched || return 1
     elif [[ "$input" =~ ^[0-9]+$ ]]; then
-        # Bare number = hours
         total_minutes=$(( input * 60 ))
     else
         return 1
@@ -1324,10 +1303,8 @@ parse_duration() {
     else
         printf "%02d:%02d:00\n" "$total_h" "$total_m"
     fi
-    return 0
 }
 
-# Total minutes from raw duration input (for limit checks)
 duration_to_minutes() {
     local input
     input=$(printf '%s' "$*" | tr '[:upper:]' '[:lower:]')
@@ -1360,17 +1337,29 @@ duration_to_minutes() {
     echo "$total_minutes"
 }
 
-welcome() {
-    local fact="${FUN_FACTS[$((RANDOM % ${#FUN_FACTS[@]}))]}"
+spinner_step() {
+    local label="$1"
+    printf "  ${DIM}%-2s %s...${NC}" ">" "$label"
+}
+
+spinner_done() {
+    local text="$1"
+    printf "\r\033[K  ${GREEN}ok${NC} %s\n" "$text"
+}
+
+spinner_warn() {
+    local text="$1"
+    printf "\r\033[K  ${YELLOW}--${NC} %s\n" "$text"
+}
+
+render_header() {
     echo ""
     local art
     art=$(cat << 'EOF'
- _____ _____ _   _ _   _ ___________ _____  _____ _   _ _____  _____
-/  __ \  _  | \ | | | | |  ___| ___ \  __ \|  ___| \ | /  __ \|  ___|
-| /  \/ | | |  \| | | | | |__ | |_/ / |  \/| |__ |  \| | /  \/| |__
-| |   | | | | . ` | | | |  __||    /| | __ |  __|| . ` | |    |  __|
-| \__/\ \_/ / |\  \ \_/ / |___| |\ \| |_\ \| |___| |\  | \__/\| |___
- \____/\___/\_| \_/\___/\____/\_| \_|\____/\____/\_| \_/\____/\____/
+   _________  _   ____   __
+  / ___/ __ \| | / / /  / /
+ / /__/ /_/ /| |/ / /__/ /
+ \___/\____/ |___/____/_/
 EOF
     )
     while IFS= read -r line; do
@@ -1378,25 +1367,59 @@ EOF
         sleep 0.03
     done <<< "$art"
     echo ""
-    printf "  ${GREEN}CONVERGENCE${NC} ${DIM}· LIP6 GPU Cluster Manager${NC}\n"
-    printf "  ${DIM}10 nodes · 4x A100 80GB · SLURM${NC}\n"
+    printf "  ${GREEN}CONVERGENCE${NC} ${DIM}· LIP6 GPU Cockpit · Slurm · A100${NC}\n"
+}
+
+render_status() {
+    echo ""
+    spinner_step "checking front"
+    if ssh -n -o BatchMode=yes -o ConnectTimeout=5 conv "echo ok" 2>/dev/null | grep -q ok; then
+        spinner_done "front reachable"
+    else
+        spinner_warn "front unreachable"
+        return
+    fi
+
+    spinner_step "reading jobs"
+    local raw running pending tunnels gpu_hint
+    raw=$(ssh -n conv bash -c "\"squeue -h -u ${CONV_USER} -o '%T|%R'\"" 2>/dev/null || true)
+    running=$(printf '%s\n' "$raw" | awk -F'|' '$1=="RUNNING"{c++} END{print c+0}')
+    pending=$(printf '%s\n' "$raw" | awk -F'|' '$1!="RUNNING" && $1!=""{c++} END{print c+0}')
+    tunnels=$(find "$TUNNEL_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')
+    spinner_done "jobs: ${running} running / ${pending} pending · tunnels: ${tunnels}"
+
+    spinner_step "scanning GPUs"
+    gpu_hint=$(ssh -n conv "sinfo -p convergence -h -O 'nodelist:10,gresused:35,statelong:12' 2>/dev/null | head -3" 2>/dev/null || true)
+    if [ -n "$gpu_hint" ]; then
+        spinner_done "GPU status available with option 4"
+    else
+        spinner_warn "GPU status unavailable"
+    fi
+}
+
+welcome() {
+    local fact="${FUN_FACTS[$((RANDOM % ${#FUN_FACTS[@]}))]}"
+    render_header
     echo ""
     printf "  ${DIM}💡 %s${NC}\n" "$fact"
 }
 
-show_menu() {
+print_action_menu() {
     echo ""
     echo -e "${BOLD}What do you want to do?${NC}"
     echo ""
-    echo -e "  ${GREEN}1${NC})  Launch a new GPU session"
-    echo -e "  ${GREEN}2${NC})  Reconnect to a running session"
-    echo -e "  ${GREEN}3${NC})  View my jobs"
-    echo -e "  ${GREEN}4${NC})  Cancel jobs"
-    echo -e "  ${GREEN}5${NC})  Cluster status (GPUs, nodes)"
+    echo -e "  ${GREEN}1${NC})  Start smart GPU session"
+    echo -e "  ${GREEN}2${NC})  Reconnect to running session"
+    echo -e "  ${GREEN}3${NC})  Jobs and logs"
+    echo -e "  ${GREEN}4${NC})  Cluster status"
+    echo -e "  ${GREEN}5${NC})  Cleanup jobs or tunnels"
     echo -e "  ${GREEN}6${NC})  SSH into login node"
-    echo -e "  ${GREEN}7${NC})  Disconnect tunnel"
-    echo -e "  ${CYAN}0${NC})  Exit"
+    echo -e "  ${RED}q${NC})  Quit"
     echo ""
+}
+
+show_menu() {
+    print_action_menu
 }
 
 pick_gpu() {
@@ -1405,26 +1428,46 @@ pick_gpu() {
     echo ""
     echo -e "  ${GREEN}1${NC})  A100 80GB full     ${DIM}(node01-06, best for large models)${NC}"
     echo -e "  ${GREEN}2${NC})  A100 40GB MIG       ${DIM}(node07-10, good for smaller jobs)${NC}"
-    echo -e "  ${CYAN}0${NC})  Back"
     echo ""
     read -p "> " gpu_choice
     case $gpu_choice in
-        0) return 1 ;;
         1) GPU_TYPE="a100_7g.80gb" ;;
         2) GPU_TYPE="a100_3g.40gb" ;;
         *) GPU_TYPE="a100_7g.80gb" ;;
     esac
-    return 0
+}
+
+pick_node_for_gpu_type() {
+    local gpu_type="$1"
+    NODE_LIST=""
+    echo ""
+    echo -e "${BOLD}Pin to an exact node?${NC}"
+    echo -e "  ${DIM}Press Enter to let Slurm choose.${NC}"
+    if [ "$gpu_type" = "a100_7g.80gb" ]; then
+        echo -e "  ${DIM}Full A100 nodes: node01-node06${NC}"
+    else
+        echo -e "  ${DIM}MIG nodes: node07-node10${NC}"
+    fi
+    read -p "> " node_choice
+    [ -z "$node_choice" ] && return 0
+    if ! is_conv_node "$node_choice"; then
+        echo -e "${RED}Invalid node. Use node01 through node10.${NC}"
+        return 1
+    fi
+    if ! node_matches_gpu "$node_choice" "$gpu_type"; then
+        echo -e "${RED}${node_choice} does not match the selected GPU type.${NC}"
+        return 1
+    fi
+    NODE_LIST="$node_choice"
 }
 
 launch_session() {
-    pick_gpu || return
+    pick_gpu
 
     echo ""
     echo -e "${BOLD}How many GPUs?${NC}"
-    echo -e "  ${DIM}Press Enter for 1 (max 4 per node for full, 8 for MIG), 0 to go back${NC}"
+    echo -e "  ${DIM}Press Enter for 1 (max 4 per node for full, 8 for MIG)${NC}"
     read -p "> " num_gpus
-    [ "$num_gpus" = "0" ] && return
     num_gpus="${num_gpus:-1}"
     if ! is_int "$num_gpus"; then
         echo -e "${RED}GPU count must be a number (e.g. 1, 2, 4).${NC}"
@@ -1433,27 +1476,18 @@ launch_session() {
 
     echo ""
     echo -e "${BOLD}How long do you need?${NC}"
-    echo -e "  ${DIM}e.g. 8h, 3d, 1d 6h 30m, 08:00:00 — Enter for 8h, 0 to go back${NC}"
+    echo -e "  ${DIM}Press Enter for 8 hours. Examples: 8h, 1d 6h, 08:00:00${NC}"
     read -p "> " wall_input
-    [ "$wall_input" = "0" ] && return
     wall_input="${wall_input:-8h}"
-    wall=$(parse_duration "$wall_input")
-    if [ $? -ne 0 ] || [ -z "$wall" ]; then
-        echo -e "${RED}Invalid duration. Examples: 8h, 3d, 1d 6h 30m, 08:00:00${NC}"
+    wall=$(parse_duration "$wall_input") || {
+        echo -e "${RED}Invalid duration. Use 8h, 1d 6h, 30m, or HH:MM:SS.${NC}"
         return
-    fi
-
-    # Warn if > 15 days
-    local total_min=$(duration_to_minutes "$wall_input")
-    if [ "$total_min" -gt 21600 ] 2>/dev/null; then
-        echo -e "${YELLOW}Warning: Duration exceeds the 15-day maximum for Convergence.${NC}"
-    fi
+    }
 
     echo ""
     echo -e "${BOLD}Job name?${NC}"
-    echo -e "  ${DIM}Press Enter for 'gpu-session', 0 to go back${NC}"
+    echo -e "  ${DIM}Press Enter for 'gpu-session' (letters, digits, hyphens, underscores only)${NC}"
     read -p "> " job_name
-    [ "$job_name" = "0" ] && return
     job_name="${job_name:-gpu-session}"
     if ! is_name "$job_name"; then
         echo -e "${RED}Invalid job name. Use only letters, digits, hyphens, underscores.${NC}"
@@ -1464,15 +1498,13 @@ launch_session() {
     echo -e "${BOLD}CPU vendor?${NC}"
     echo -e "  ${GREEN}1${NC})  Intel"
     echo -e "  ${GREEN}2${NC})  AMD"
-    echo -e "  ${CYAN}0${NC})  Back"
     echo ""
     read -p "> " cpu_choice
-    [ "$cpu_choice" = "0" ] && return
     cpu_choice="${cpu_choice:-1}"
     case $cpu_choice in
         1) CPU_FEATURE="intel" ;;
         2) CPU_FEATURE="amd" ;;
-        *) echo -e "${RED}Choose 1, 2, or 0.${NC}"; return ;;
+        *) echo -e "${RED}Choose 1 or 2.${NC}"; return ;;
     esac
     if [ "$GPU_TYPE" = "a100_3g.40gb" ] && [ "$CPU_FEATURE" = "amd" ]; then
         echo -e "${RED}AMD is only available on the full A100 node. Choose A100 80GB full or Intel.${NC}"
@@ -1488,71 +1520,71 @@ launch_session() {
         return
     fi
 
+    pick_node_for_gpu_type "$GPU_TYPE" || return
+
     echo ""
     echo -e "${BOLD}How do you want to work?${NC}"
-    echo ""
-    echo -e "  ${GREEN}1${NC})  Jupyter Lab + Terminal  ${DIM}(recommended)${NC}"
-    echo -e "      ${DIM}Persistent — survives disconnect. Opens browser + shows SSH command.${NC}"
-    echo -e "  ${GREEN}2${NC})  Terminal only  ${DIM}(interactive)${NC}"
-    echo -e "      ${DIM}Direct shell on compute node. Ends when you disconnect.${NC}"
-    echo -e "  ${GREEN}3${NC})  Submit a custom script"
-    echo -e "      ${DIM}Run your own batch script with SLURM.${NC}"
-    echo -e "  ${CYAN}0${NC})  Back"
+    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
+    echo -e "  ${GREEN}2${NC})  Terminal only (SSH into compute node)"
+    echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
+    echo -e "  ${GREEN}4${NC})  Submit a custom script"
     echo ""
     read -p "> " mode
-    [ "$mode" = "0" ] && return
     mode="${mode:-1}"
-    if ! [[ "$mode" =~ ^[1-3]$ ]]; then
-        echo -e "${RED}Choose 1, 2, or 3.${NC}"
+    if ! [[ "$mode" =~ ^[1-4]$ ]]; then
+        echo -e "${RED}Choose 1, 2, 3, or 4.${NC}"
         return
     fi
 
-    if [ "$mode" = "3" ]; then
-        submit_custom "$num_gpus" "$wall" "$job_name" "$CPU_FEATURE" "$MEMORY"
+    if [ "$mode" = "4" ]; then
+        submit_custom "$num_gpus" "$wall" "$job_name" "$CPU_FEATURE" "$MEMORY" "$NODE_LIST"
         return
     fi
 
-    SLURM_EXTRA=$(slurm_options "$CPU_FEATURE" "$MEMORY")
+    SLURM_EXTRA=$(slurm_options "$CPU_FEATURE" "$MEMORY" "$NODE_LIST")
 
     if [ "$mode" = "2" ]; then
         echo ""
         echo -e "${CYAN}Requesting interactive session: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
-        echo -e "${DIM}This is interactive — ends when you disconnect.${NC}"
+        echo -e "${DIM}This is interactive — dies when you disconnect.${NC}"
+        echo -e "${DIM}Use option 1 or 3 for persistent Jupyter sessions.${NC}"
         echo ""
+        echo -e "${DIM}salloc --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA}${NC}"
         ssh -t conv "salloc --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA}"
         return
     fi
 
     echo ""
     echo -e "${CYAN}Submitting Jupyter Lab: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
+    echo -e "${DIM}sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA}${NC}"
 
-    # Check if Jupyter is available in a user-owned env on the shared home.
-    status_line "  ● Checking Jupyter installation..."
-    jupyter_check=$(ssh conv 'test -x ~/.venvs/conv_jupyter/bin/jupyter && echo ok' 2>/dev/null)
+    spinner_step "checking Jupyter env"
+    jupyter_check=$(ssh conv 'test -x ~/.venvs/conv_jupyter/bin/jupyter && echo ok' 2>/dev/null || true)
     if [ -z "$jupyter_check" ]; then
-        status_done "  $(echo -e "${YELLOW}! Jupyter not found. Installing...${NC}")"
+        spinner_warn "Jupyter missing; installing in ~/.venvs/conv_jupyter"
         ssh conv 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; python -m venv ~/.venvs/conv_jupyter && ~/.venvs/conv_jupyter/bin/python -m pip install --quiet --upgrade pip jupyterlab' 2>/dev/null
-        if [ $? -eq 0 ]; then
-            echo -e "  ${GREEN}✓ Jupyter Lab installed${NC}"
-        else
-            echo -e "  ${RED}✗ Failed to install Jupyter. Check manually.${NC}"
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}Failed to install Jupyter. Check manually.${NC}"
             return
         fi
     else
-        status_done "  $(echo -e "${GREEN}✓${NC} Jupyter available")"
+        spinner_done "Jupyter env ready"
     fi
 
-    JOBID=$(ssh conv bash -s "$num_gpus" "$GPU_TYPE" "$wall" "$job_name" "$CPU_FEATURE" "$MEMORY" << 'REMOTE'
+    JOBID=$(ssh conv bash -s "$num_gpus" "$GPU_TYPE" "$wall" "$job_name" "$CPU_FEATURE" "$MEMORY" "$NODE_LIST" << 'REMOTE'
 NUM_GPUS="$1"
 GPU_TYPE="$2"
 WALL="$3"
 JOB_NAME="$4"
 CPU_FEATURE="$5"
 MEMORY="$6"
+NODE_LIST="$7"
 CONSTRAINT_LINE=""
 MEMORY_LINE=""
+NODE_LINE=""
 [ -n "$CPU_FEATURE" ] && CONSTRAINT_LINE="#SBATCH --constraint=${CPU_FEATURE}"
 [ -n "$MEMORY" ] && MEMORY_LINE="#SBATCH --mem=${MEMORY}"
+[ -n "$NODE_LIST" ] && NODE_LINE="#SBATCH --nodelist=${NODE_LIST}"
 cat > ~/._conv_jupyter.sh << JOBSCRIPT
 #!/bin/bash
 #SBATCH --job-name=${JOB_NAME}
@@ -1561,6 +1593,7 @@ cat > ~/._conv_jupyter.sh << JOBSCRIPT
 #SBATCH --time=${WALL}
 ${CONSTRAINT_LINE}
 ${MEMORY_LINE}
+${NODE_LINE}
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=__EMAIL__
 #SBATCH --output=%x-%j.out
@@ -1588,58 +1621,34 @@ REMOTE
     echo -e "${DIM}(Convergence queue can take minutes to hours depending on load)${NC}"
     sleep 5
 
-    # Trap Ctrl+C during wait
-    local wait_interrupted=false
-    trap 'wait_interrupted=true' INT
-
     local attempts=0
-    local spin_idx=0
     while true; do
-        if $wait_interrupted; then
-            status_done ""
-            echo ""
-            echo -e "${YELLOW}Job $JOBID is still queued. You'll get an email when it starts.${NC}"
-            echo -e "Use option 2 to reconnect later."
-            trap - INT
-            return
-        fi
         STATE=$(ssh conv bash -c "\"squeue -j $JOBID -h -o '%T'\"" 2>/dev/null)
         if [ "$STATE" = "RUNNING" ]; then
-            status_done "  $(echo -e "${GREEN}✓ Job $JOBID is running${NC}")"
             break
         elif [ "$STATE" = "FAILED" ] || [ "$STATE" = "CANCELLED" ] || [ "$STATE" = "TIMEOUT" ]; then
-            status_done ""
             echo -e "${RED}Job failed (state: $STATE)${NC}"
             echo -e "Check logs: ${DIM}ssh conv 'cat ~/${job_name}-${JOBID}.err'${NC}"
-            trap - INT
             return
         elif [ -z "$STATE" ]; then
             local sacct_state
             sacct_state=$(ssh conv "sacct -j '$JOBID' --format=State -X --noheader 2>/dev/null | tr -d ' '" 2>/dev/null)
             if [ -n "$sacct_state" ] && [ "$sacct_state" != "PENDING" ] && [ "$sacct_state" != "RUNNING" ]; then
-                status_done ""
                 echo -e "${RED}Job ended (state: ${sacct_state:-unknown})${NC}"
                 echo -e "Check logs: ${DIM}ssh conv 'cat ~/${job_name}-${JOBID}.err'${NC}"
-                trap - INT
                 return
             fi
         fi
         attempts=$((attempts + 1))
         if [ $attempts -gt 120 ]; then
-            status_done ""
-            echo ""
-            echo -e "${YELLOW}Job $JOBID is still queued after 10 min. You'll get an email when it starts.${NC}"
-            echo -e "Use option 2 to reconnect later."
-            trap - INT
+            echo -e "${YELLOW}Still queued after 10 min. Job $JOBID is waiting for GPUs.${NC}"
+            echo -e "Use option 2 to connect later, or option 4 to cancel."
             return
         fi
-        local sc="${spin_chars[$((spin_idx % ${#spin_chars[@]}))]}"
-        spin_idx=$((spin_idx + 1))
-        status_line "  ${sc} ${STATE:-PENDING} — waiting for GPUs ($((attempts * 5))s) — Ctrl+C to stop waiting"
+        echo -e "  ${DIM}${STATE:-PENDING}... ($((attempts * 5))s)${NC}"
         sleep 5
     done
 
-    trap - INT
     connect_to_job "$JOBID" "$mode" "$job_name"
 }
 
@@ -1649,12 +1658,12 @@ submit_custom() {
     local job_name="$3"
     local cpu_feature="$4"
     local memory="$5"
+    local node_list="$6"
 
     echo ""
     echo -e "${BOLD}Path to your script on the cluster?${NC}"
-    echo -e "  ${DIM}e.g. ~/train.sh — 0 to go back${NC}"
+    echo -e "  ${DIM}e.g. ~/train.sh (letters, digits, ., _, ~, /, - only)${NC}"
     read -p "> " script_path
-    [ "$script_path" = "0" ] && return
 
     if [ -z "$script_path" ]; then
         echo -e "${RED}No script provided.${NC}"
@@ -1668,7 +1677,8 @@ submit_custom() {
     echo ""
     echo -e "${CYAN}Submitting ${script_path}: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
 
-    SLURM_EXTRA=$(slurm_options "$cpu_feature" "$memory")
+    SLURM_EXTRA=$(slurm_options "$cpu_feature" "$memory" "$node_list")
+    echo -e "${DIM}sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA} '${script_path}'${NC}"
     JOBID=$(ssh conv "sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA} --mail-type=ALL --mail-user=__EMAIL__ --output=%x-%j.out --error=%x-%j.err '${script_path}' 2>&1 | grep -oP 'Submitted batch job \K[0-9]+'")
 
     if [ -z "$JOBID" ] || ! is_int "$JOBID"; then
@@ -1697,21 +1707,15 @@ connect_to_job() {
     echo -e "${CYAN}Running on ${BOLD}$node${NC}${CYAN}. Waiting for Jupyter...${NC}"
 
     local url=""
-    local spin_idx=0
     for i in $(seq 1 30); do
         url=$(ssh conv "grep -o 'http://[^ ]*' ~/*-'${jobid}'.err 2>/dev/null | tail -1" 2>/dev/null)
         if [ -n "$url" ]; then
-            status_done "  $(echo -e "${GREEN}✓${NC} Jupyter is ready")"
             break
         fi
-        local sc="${spin_chars[$((spin_idx % ${#spin_chars[@]}))]}"
-        spin_idx=$((spin_idx + 1))
-        status_line "  ${sc} Waiting for Jupyter to start... ($((i * 2))s)"
         sleep 2
     done
 
     if [ -z "$url" ]; then
-        status_done ""
         echo -e "${RED}Jupyter didn't start.${NC}"
         echo -e "Check logs: ${DIM}ssh conv 'cat ~/*-${jobid}.err'${NC}"
         return
@@ -1723,8 +1727,10 @@ connect_to_job() {
         echo -e "${RED}Could not determine Jupyter port.${NC}"
         return
     fi
-    local local_port=$(find_free_port)
-    local local_url=$(echo "$url" | sed "s|http://[^:]*:${remote_port}|http://localhost:${local_port}|")
+    local local_port
+    local_port=$(find_free_port)
+    local local_url
+    local_url=$(echo "$url" | sed "s|http://[^:]*:${remote_port}|http://localhost:${local_port}|")
 
     echo ""
     echo -e "${GREEN}================================================${NC}"
@@ -1736,6 +1742,7 @@ connect_to_job() {
     echo -e "  ${BOLD}Port:${NC}   $remote_port"
     echo -e "  ${BOLD}URL:${NC}    ${CYAN}$local_url${NC}"
     echo ""
+
     # Start tunnel in background
     ssh -N -J conv -L "${local_port}:localhost:${remote_port}" "${node}.convergence.lip6.fr" &
     local tunnel_pid=$!
@@ -1754,26 +1761,31 @@ connect_to_job() {
     elif command -v open &>/dev/null; then
         open "$local_url" &
     fi
-    echo ""
-    echo -e "${BOLD}To open a terminal on $node, run in another tab:${NC}"
-    echo ""
-    echo -e "  ${GREEN}ssh -t -J conv ${node}.convergence.lip6.fr${NC}"
+
+    if [ "$mode" = "3" ]; then
+        echo ""
+        echo -e "${BOLD}To open a terminal on $node, run in another tab:${NC}"
+        echo ""
+        echo -e "  ${GREEN}ssh -t -J conv ${node}.convergence.lip6.fr${NC}"
+        echo ""
+        echo -e "${DIM}Or with Kitty:${NC}"
+        echo ""
+        echo -e "  ${GREEN}kitty +kitten ssh -t -J conv ${node}.convergence.lip6.fr${NC}"
+    fi
 }
 
 my_jobs() {
     echo ""
-    status_line "  ● Fetching jobs..."
+    echo -e "${DIM}Loading, please wait...${NC}"
 
     local raw
     raw=$(ssh conv bash -c "\"squeue -h -u ${CONV_USER} -o '%i|%j|%T|%M|%l|%L|%R'\"" 2>/dev/null)
 
     if [ -z "$raw" ]; then
-        status_done "  $(echo -e "${DIM}No jobs found.${NC}")"
+        echo -e "${DIM}No running jobs.${NC}"
         echo ""
         return
     fi
-
-    status_done ""
 
     local has_running=false has_pending=false
     local running_lines="" pending_lines=""
@@ -1803,11 +1815,24 @@ my_jobs() {
         echo -e "  ${DIM}──────────────────────────────────────────────────────────────${NC}"
         printf "%s" "$pending_lines"
     fi
+
+    echo ""
+    echo -e "${DIM}Detailed info on a job:${NC}"
+    read -p "Job ID (or Enter to skip): " jobid
+    if [ -n "$jobid" ]; then
+        if ! is_int "$jobid"; then
+            echo -e "${RED}Invalid job ID (must be a number).${NC}"
+            return
+        fi
+        echo ""
+        ssh conv "sacct -j '$jobid' --format='JobID,JobName,NodeList,AllocTres%80,Start,End,State' -X 2>/dev/null" 2>/dev/null
+    fi
     echo ""
 }
 
 cancel_job() {
     echo ""
+    echo -e "${DIM}Loading, please wait...${NC}"
 
     local raw
     raw=$(ssh conv bash -c "\"squeue -h -u ${CONV_USER} -o '%i|%j|%T|%M|%l|%R'\"" 2>/dev/null)
@@ -1826,9 +1851,8 @@ cancel_job() {
         printf "  %-8s %-20s %-10s %-12s %-12s %s\n" "$jid" "$name" "$state" "$elapsed" "$limit" "$node"
     done <<< "$raw"
     echo ""
-    echo -e "Enter a job ID to cancel, ${BOLD}all${NC} to cancel everything, or ${CYAN}0${NC} to go back."
+    echo -e "Enter a job ID to cancel, or ${BOLD}all${NC} to cancel everything."
     read -p "> " jobid
-    [ "$jobid" = "0" ] && return
     if [ "$jobid" = "all" ]; then
         ssh conv "bash -c 'for jid in \$(squeue -h -u ${CONV_USER} -o \"%i\"); do rm -f ~/*-\${jid}.out ~/*-\${jid}.err; done; scancel -u ${CONV_USER}'" 2>/dev/null
         echo -e "${GREEN}All jobs cancelled and log files cleaned up.${NC}"
@@ -1841,6 +1865,8 @@ cancel_job() {
 }
 
 cluster_status() {
+    echo ""
+    echo -e "${DIM}Loading, please wait...${NC}"
     echo ""
     echo -e "${BOLD}Cluster status:${NC}"
     echo ""
@@ -1882,9 +1908,8 @@ connect_existing() {
             printf "  %-8s %-20s %-10s %-12s %-12s %s\n" "$jid" "$name" "$state" "$elapsed" "$limit" "$node"
         done <<< "$raw"
         echo ""
-        echo -e "Enter the job ID to connect to (or ${CYAN}0${NC} to go back):"
+        echo -e "Enter the job ID you want to connect to:"
         read -p "> " jobid
-        [ "$jobid" = "0" ] && return
         if [ -n "$jobid" ]; then
             job_name=$(ssh conv bash -c "\"squeue -h -j $jobid -o '%j'\"" 2>/dev/null)
         fi
@@ -1900,15 +1925,14 @@ connect_existing() {
 
     echo ""
     echo -e "${BOLD}How do you want to connect?${NC}"
-    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser + shows SSH command)"
+    echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
     echo -e "  ${GREEN}2${NC})  Terminal only"
-    echo -e "  ${CYAN}0${NC})  Back"
+    echo -e "  ${GREEN}3${NC})  Both (Jupyter + terminal access)"
     echo ""
     read -p "> " mode
-    [ "$mode" = "0" ] && return
     mode="${mode:-1}"
-    if ! [[ "$mode" =~ ^[1-2]$ ]]; then
-        echo -e "${RED}Choose 1 or 2.${NC}"
+    if ! [[ "$mode" =~ ^[1-3]$ ]]; then
+        echo -e "${RED}Choose 1, 2, or 3.${NC}"
         return
     fi
 
@@ -1969,21 +1993,24 @@ sever_tunnel() {
     fi
 }
 
+# Entry point
 welcome
-while true; do
-    show_menu
-    read -p "> " choice
-    case $choice in
-        1) launch_session ;;
-        2) connect_existing ;;
-        3) my_jobs ;;
-        4) cancel_job ;;
-        5) cluster_status ;;
-        6) ssh conv ;;
-        7) sever_tunnel ;;
-        0) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
-        *) echo -e "${RED}Invalid choice.${NC}" ;;
-    esac
+
+    while true; do
+        echo ""
+        render_status
+        show_menu
+        read -p "> " choice
+        case $choice in
+            1) launch_session ;;
+            2) connect_existing ;;
+            3) my_jobs ;;
+            4) cluster_status ;;
+            5) cancel_job; sever_tunnel ;;
+            6) ssh conv ;;
+            q|Q) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
+            *) echo -e "${RED}Invalid choice.${NC}" ;;
+        esac
 done
 CONV_SCRIPT
 
@@ -2059,16 +2086,43 @@ USERNAME="$1"
 EMAIL="$2"
 HPC_STORAGE="$3"
 
-# Backup before modifying
-if [ -f ~/.bashrc ]; then
-    cp ~/.bashrc ~/.bashrc.pre-lip6-setup
-fi
+install_remote_block() {
+    marker="$1"
+    content=$(cat)
+    ts=$(date +%Y%m%d%H%M%S)
+    [ -f ~/.bashrc ] || touch ~/.bashrc
+    cp ~/.bashrc ~/.bashrc.pre-lip6-setup.$ts
+    tmp=$(mktemp ~/.bashrc.lip6.XXXXXX)
+    awk -v begin="# BEGIN ${marker}" -v end="# END ${marker}" '
+        $0 == begin { skip=1; next }
+        $0 == end { skip=0; next }
+        !skip { print }
+    ' ~/.bashrc > "$tmp"
+    {
+        printf "%s\n" "# BEGIN ${marker}"
+        printf "%s\n" "$content"
+        printf "%s\n" "# END ${marker}"
+    } >> "$tmp"
+    mv "$tmp" ~/.bashrc
+}
 
-# Only add if not already present
-if ! grep -q "HPC Aliases" ~/.bashrc 2>/dev/null; then
-    cat >> ~/.bashrc << ALIASES
+remove_remote_block() {
+    marker="$1"
+    [ -f ~/.bashrc ] || return 0
+    tmp=$(mktemp ~/.bashrc.lip6.XXXXXX)
+    awk -v begin="# BEGIN ${marker}" -v end="# END ${marker}" '
+        $0 == begin { skip=1; next }
+        $0 == end { skip=0; next }
+        !skip { print }
+    ' ~/.bashrc > "$tmp" && mv "$tmp" ~/.bashrc
+}
 
-# === HPC Aliases ===
+verify_remote_login() { echo ok >/dev/null; }
+
+# BEGIN LIP6 HPC Aliases is generated by install_remote_block.
+install_remote_block "LIP6 HPC Aliases" << ALIASES
+
+# === LIP6 HPC Aliases ===
 
 hpc-conda() {
     source /etc/profile.d/modules.sh
@@ -2121,10 +2175,7 @@ hpc-help() {
     echo "  ${HPC_STORAGE}   team storage"
 }
 ALIASES
-    echo "HPC aliases added."
-else
-    echo "HPC aliases already present."
-fi
+echo "HPC aliases configured."
 REMOTE_HPC
     echo -e "${GREEN}HPC aliases configured.${NC}"
 fi
@@ -2135,15 +2186,43 @@ if $SETUP_CONV; then
 USERNAME="$1"
 EMAIL="$2"
 
-# Backup before modifying
-if [ -f ~/.bashrc ]; then
-    cp ~/.bashrc ~/.bashrc.pre-lip6-setup
-fi
+install_remote_block() {
+    marker="$1"
+    content=$(cat)
+    ts=$(date +%Y%m%d%H%M%S)
+    [ -f ~/.bashrc ] || touch ~/.bashrc
+    cp ~/.bashrc ~/.bashrc.pre-lip6-setup.$ts
+    tmp=$(mktemp ~/.bashrc.lip6.XXXXXX)
+    awk -v begin="# BEGIN ${marker}" -v end="# END ${marker}" '
+        $0 == begin { skip=1; next }
+        $0 == end { skip=0; next }
+        !skip { print }
+    ' ~/.bashrc > "$tmp"
+    {
+        printf "%s\n" "# BEGIN ${marker}"
+        printf "%s\n" "$content"
+        printf "%s\n" "# END ${marker}"
+    } >> "$tmp"
+    mv "$tmp" ~/.bashrc
+}
 
-if ! grep -q "Convergence Cluster Aliases" ~/.bashrc 2>/dev/null; then
-    cat >> ~/.bashrc << ALIASES
+remove_remote_block() {
+    marker="$1"
+    [ -f ~/.bashrc ] || return 0
+    tmp=$(mktemp ~/.bashrc.lip6.XXXXXX)
+    awk -v begin="# BEGIN ${marker}" -v end="# END ${marker}" '
+        $0 == begin { skip=1; next }
+        $0 == end { skip=0; next }
+        !skip { print }
+    ' ~/.bashrc > "$tmp" && mv "$tmp" ~/.bashrc
+}
 
-# === Convergence Cluster Aliases ===
+verify_remote_login() { echo ok >/dev/null; }
+
+# BEGIN LIP6 Convergence Cluster Aliases is generated by install_remote_block.
+install_remote_block "LIP6 Convergence Cluster Aliases" << ALIASES
+
+# === LIP6 Convergence Cluster Aliases ===
 
 conv-conda() {
     source /etc/profile.d/modules.sh 2>/dev/null
@@ -2194,10 +2273,7 @@ conv-help() {
     echo "  Per GPU default: 8 threads + 64GB RAM"
 }
 ALIASES
-    echo "Convergence aliases added."
-else
-    echo "Convergence aliases already present."
-fi
+echo "Convergence aliases configured."
 
 # Disable conda auto-activate
 conda config --set auto_activate_base false 2>/dev/null || true

@@ -29,14 +29,27 @@ is_wall() { [[ "$1" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; }
 is_name() { [[ "$1" =~ ^[a-zA-Z0-9_.-]+$ ]]; }
 is_path() { [[ "$1" =~ ^[a-zA-Z0-9_.~/-]+$ ]]; }
 is_mem()  { [[ "$1" =~ ^[0-9]+([KkMmGgTt])?$ ]]; }
+is_conv_node() { [[ "$1" =~ ^node(0[1-9]|10)$ ]]; }
+
+node_matches_gpu() {
+    local node="$1"
+    local gpu_type="$2"
+    case "$gpu_type" in
+        a100_7g.80gb) [[ "$node" =~ ^node0[1-6]$ ]] ;;
+        a100_3g.40gb) [[ "$node" =~ ^node(0[7-9]|10)$ ]] ;;
+        *) return 1 ;;
+    esac
+}
 
 slurm_options() {
     local cpu_feature="$1"
     local memory="$2"
+    local node="$3"
     local opts=""
     memory=$(printf '%s' "$memory" | tr '[:lower:]' '[:upper:]')
     [ -n "$cpu_feature" ] && opts="${opts} --constraint=${cpu_feature}"
     [ -n "$memory" ] && opts="${opts} --mem=${memory}"
+    [ -n "$node" ] && opts="${opts} --nodelist=${node}"
     echo "$opts"
 }
 
@@ -63,17 +76,118 @@ FUN_FACTS=(
     "The ImageNet dataset that sparked the deep learning revolution contains 14 million images."
 )
 
-welcome() {
-    local fact="${FUN_FACTS[$((RANDOM % ${#FUN_FACTS[@]}))]}"
+# parse_duration INPUT
+# Accepts: 30m, 8h, 3d, 3d 12h, 1d 6h 30m, HH:MM:SS, bare number (hours)
+parse_duration() {
+    local input
+    input=$(printf '%s' "$*" | tr '[:upper:]' '[:lower:]')
+    input=$(printf '%s' "$input" | xargs)
+    [ -z "$input" ] && return 1
+
+    if [[ "$input" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
+        local h m s
+        IFS=':' read -r h m s <<< "$input"
+        h=$((10#$h))
+        m=$((10#$m))
+        s=$((10#$s))
+        if [ "$h" -ge 24 ]; then
+            local d=$(( h / 24 ))
+            local rem_h=$(( h % 24 ))
+            printf "%d-%02d:%02d:%02d\n" "$d" "$rem_h" "$m" "$s"
+        else
+            printf "%02d:%02d:%02d\n" "$h" "$m" "$s"
+        fi
+        return 0
+    fi
+
+    local total_minutes=0
+    local matched=false
+    if [[ "$input" =~ [dhm] ]]; then
+        if [[ "$input" =~ ([0-9]+)d ]]; then
+            total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 1440 ))
+            matched=true
+        fi
+        if [[ "$input" =~ ([0-9]+)h ]]; then
+            total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 60 ))
+            matched=true
+        fi
+        if [[ "$input" =~ ([0-9]+)m ]]; then
+            total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} ))
+            matched=true
+        fi
+        $matched || return 1
+    elif [[ "$input" =~ ^[0-9]+$ ]]; then
+        total_minutes=$(( input * 60 ))
+    else
+        return 1
+    fi
+
+    local total_h=$(( total_minutes / 60 ))
+    local total_m=$(( total_minutes % 60 ))
+    if [ "$total_h" -ge 24 ]; then
+        local d=$(( total_h / 24 ))
+        local rem_h=$(( total_h % 24 ))
+        printf "%d-%02d:%02d:00\n" "$d" "$rem_h" "$total_m"
+    else
+        printf "%02d:%02d:00\n" "$total_h" "$total_m"
+    fi
+}
+
+duration_to_minutes() {
+    local input
+    input=$(printf '%s' "$*" | tr '[:upper:]' '[:lower:]')
+    input=$(printf '%s' "$input" | xargs)
+    [ -z "$input" ] && echo "0" && return
+
+    if [[ "$input" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
+        local h m s
+        IFS=':' read -r h m s <<< "$input"
+        h=$((10#$h))
+        m=$((10#$m))
+        s=$((10#$s))
+        echo $(( h * 60 + m ))
+        return
+    fi
+
+    local total_minutes=0
+    if [[ "$input" =~ ([0-9]+)d ]]; then
+        total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 1440 ))
+    fi
+    if [[ "$input" =~ ([0-9]+)h ]]; then
+        total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 60 ))
+    fi
+    if [[ "$input" =~ ([0-9]+)m ]]; then
+        total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} ))
+    fi
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        total_minutes=$(( input * 60 ))
+    fi
+    echo "$total_minutes"
+}
+
+spinner_step() {
+    local label="$1"
+    printf "  ${DIM}%-2s %s...${NC}" ">" "$label"
+}
+
+spinner_done() {
+    local text="$1"
+    printf "\r\033[K  ${GREEN}ok${NC} %s\n" "$text"
+}
+
+spinner_warn() {
+    local text="$1"
+    printf "\r\033[K  ${YELLOW}--${NC} %s\n" "$text"
+}
+
+render_header() {
     echo ""
     local art
     art=$(cat << 'EOF'
- _____ _____ _   _ _   _ ___________ _____  _____ _   _ _____  _____
-/  __ \  _  | \ | | | | |  ___| ___ \  __ \|  ___| \ | /  __ \|  ___|
-| /  \/ | | |  \| | | | | |__ | |_/ / |  \/| |__ |  \| | /  \/| |__
-| |   | | | | . ` | | | |  __||    /| | __ |  __|| . ` | |    |  __|
-| \__/\ \_/ / |\  \ \_/ / |___| |\ \| |_\ \| |___| |\  | \__/\| |___
- \____/\___/\_| \_/\___/\____/\_| \_|\____/\____/\_| \_/\____/\____/
+   _________  _   ____   __
+  / ___/ __ \| | / / /  / /
+ / /__/ /_/ /| |/ / /__/ /
+ \___/\____/ |___/____/_/
 EOF
     )
     while IFS= read -r line; do
@@ -81,25 +195,59 @@ EOF
         sleep 0.03
     done <<< "$art"
     echo ""
-    printf "  ${GREEN}CONVERGENCE${NC} ${DIM}· LIP6 GPU Cluster Manager${NC}\n"
-    printf "  ${DIM}10 nodes · 4x A100 80GB · SLURM${NC}\n"
+    printf "  ${GREEN}CONVERGENCE${NC} ${DIM}· LIP6 GPU Cockpit · Slurm · A100${NC}\n"
+}
+
+render_status() {
+    echo ""
+    spinner_step "checking front"
+    if ssh -n -o BatchMode=yes -o ConnectTimeout=5 conv "echo ok" 2>/dev/null | grep -q ok; then
+        spinner_done "front reachable"
+    else
+        spinner_warn "front unreachable"
+        return
+    fi
+
+    spinner_step "reading jobs"
+    local raw running pending tunnels gpu_hint
+    raw=$(ssh -n conv bash -c "\"squeue -h -u ${CONV_USER} -o '%T|%R'\"" 2>/dev/null || true)
+    running=$(printf '%s\n' "$raw" | awk -F'|' '$1=="RUNNING"{c++} END{print c+0}')
+    pending=$(printf '%s\n' "$raw" | awk -F'|' '$1!="RUNNING" && $1!=""{c++} END{print c+0}')
+    tunnels=$(find "$TUNNEL_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')
+    spinner_done "jobs: ${running} running / ${pending} pending · tunnels: ${tunnels}"
+
+    spinner_step "scanning GPUs"
+    gpu_hint=$(ssh -n conv "sinfo -p convergence -h -O 'nodelist:10,gresused:35,statelong:12' 2>/dev/null | head -3" 2>/dev/null || true)
+    if [ -n "$gpu_hint" ]; then
+        spinner_done "GPU status available with option 4"
+    else
+        spinner_warn "GPU status unavailable"
+    fi
+}
+
+welcome() {
+    local fact="${FUN_FACTS[$((RANDOM % ${#FUN_FACTS[@]}))]}"
+    render_header
     echo ""
     printf "  ${DIM}💡 %s${NC}\n" "$fact"
 }
 
-show_menu() {
+print_action_menu() {
     echo ""
     echo -e "${BOLD}What do you want to do?${NC}"
     echo ""
-    echo -e "  ${GREEN}1${NC})  Launch a new GPU session"
-    echo -e "  ${GREEN}2${NC})  Reconnect to a running session"
-    echo -e "  ${GREEN}3${NC})  View my jobs"
-    echo -e "  ${GREEN}4${NC})  Cancel jobs"
-    echo -e "  ${GREEN}5${NC})  Cluster status (GPUs, nodes)"
+    echo -e "  ${GREEN}1${NC})  Start smart GPU session"
+    echo -e "  ${GREEN}2${NC})  Reconnect to running session"
+    echo -e "  ${GREEN}3${NC})  Jobs and logs"
+    echo -e "  ${GREEN}4${NC})  Cluster status"
+    echo -e "  ${GREEN}5${NC})  Cleanup jobs or tunnels"
     echo -e "  ${GREEN}6${NC})  SSH into login node"
-    echo -e "  ${GREEN}7${NC})  Disconnect tunnel"
     echo -e "  ${RED}q${NC})  Quit"
     echo ""
+}
+
+show_menu() {
+    print_action_menu
 }
 
 pick_gpu() {
@@ -117,6 +265,30 @@ pick_gpu() {
     esac
 }
 
+pick_node_for_gpu_type() {
+    local gpu_type="$1"
+    NODE_LIST=""
+    echo ""
+    echo -e "${BOLD}Pin to an exact node?${NC}"
+    echo -e "  ${DIM}Press Enter to let Slurm choose.${NC}"
+    if [ "$gpu_type" = "a100_7g.80gb" ]; then
+        echo -e "  ${DIM}Full A100 nodes: node01-node06${NC}"
+    else
+        echo -e "  ${DIM}MIG nodes: node07-node10${NC}"
+    fi
+    read -p "> " node_choice
+    [ -z "$node_choice" ] && return 0
+    if ! is_conv_node "$node_choice"; then
+        echo -e "${RED}Invalid node. Use node01 through node10.${NC}"
+        return 1
+    fi
+    if ! node_matches_gpu "$node_choice" "$gpu_type"; then
+        echo -e "${RED}${node_choice} does not match the selected GPU type.${NC}"
+        return 1
+    fi
+    NODE_LIST="$node_choice"
+}
+
 launch_session() {
     pick_gpu
 
@@ -132,13 +304,13 @@ launch_session() {
 
     echo ""
     echo -e "${BOLD}How long do you need?${NC}"
-    echo -e "  ${DIM}Press Enter for 8 hours (format: HH:MM:SS, max 15 days)${NC}"
-    read -p "> " wall
-    wall="${wall:-08:00:00}"
-    if ! is_wall "$wall"; then
-        echo -e "${RED}Invalid format. Use HH:MM:SS (e.g. 08:00:00).${NC}"
+    echo -e "  ${DIM}Press Enter for 8 hours. Examples: 8h, 1d 6h, 08:00:00${NC}"
+    read -p "> " wall_input
+    wall_input="${wall_input:-8h}"
+    wall=$(parse_duration "$wall_input") || {
+        echo -e "${RED}Invalid duration. Use 8h, 1d 6h, 30m, or HH:MM:SS.${NC}"
         return
-    fi
+    }
 
     echo ""
     echo -e "${BOLD}Job name?${NC}"
@@ -176,6 +348,8 @@ launch_session() {
         return
     fi
 
+    pick_node_for_gpu_type "$GPU_TYPE" || return
+
     echo ""
     echo -e "${BOLD}How do you want to work?${NC}"
     echo -e "  ${GREEN}1${NC})  Jupyter Lab (opens in browser)"
@@ -191,11 +365,11 @@ launch_session() {
     fi
 
     if [ "$mode" = "4" ]; then
-        submit_custom "$num_gpus" "$wall" "$job_name" "$CPU_FEATURE" "$MEMORY"
+        submit_custom "$num_gpus" "$wall" "$job_name" "$CPU_FEATURE" "$MEMORY" "$NODE_LIST"
         return
     fi
 
-    SLURM_EXTRA=$(slurm_options "$CPU_FEATURE" "$MEMORY")
+    SLURM_EXTRA=$(slurm_options "$CPU_FEATURE" "$MEMORY" "$NODE_LIST")
 
     if [ "$mode" = "2" ]; then
         echo ""
@@ -203,24 +377,42 @@ launch_session() {
         echo -e "${DIM}This is interactive — dies when you disconnect.${NC}"
         echo -e "${DIM}Use option 1 or 3 for persistent Jupyter sessions.${NC}"
         echo ""
+        echo -e "${DIM}salloc --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA}${NC}"
         ssh -t conv "salloc --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA}"
         return
     fi
 
     echo ""
     echo -e "${CYAN}Submitting Jupyter Lab: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
+    echo -e "${DIM}sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA}${NC}"
 
-    JOBID=$(ssh conv bash -s "$num_gpus" "$GPU_TYPE" "$wall" "$job_name" "$CPU_FEATURE" "$MEMORY" << 'REMOTE'
+    spinner_step "checking Jupyter env"
+    jupyter_check=$(ssh conv 'test -x ~/.venvs/conv_jupyter/bin/jupyter && echo ok' 2>/dev/null || true)
+    if [ -z "$jupyter_check" ]; then
+        spinner_warn "Jupyter missing; installing in ~/.venvs/conv_jupyter"
+        ssh conv 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; python -m venv ~/.venvs/conv_jupyter && ~/.venvs/conv_jupyter/bin/python -m pip install --quiet --upgrade pip jupyterlab' 2>/dev/null
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}Failed to install Jupyter. Check manually.${NC}"
+            return
+        fi
+    else
+        spinner_done "Jupyter env ready"
+    fi
+
+    JOBID=$(ssh conv bash -s "$num_gpus" "$GPU_TYPE" "$wall" "$job_name" "$CPU_FEATURE" "$MEMORY" "$NODE_LIST" << 'REMOTE'
 NUM_GPUS="$1"
 GPU_TYPE="$2"
 WALL="$3"
 JOB_NAME="$4"
 CPU_FEATURE="$5"
 MEMORY="$6"
+NODE_LIST="$7"
 CONSTRAINT_LINE=""
 MEMORY_LINE=""
+NODE_LINE=""
 [ -n "$CPU_FEATURE" ] && CONSTRAINT_LINE="#SBATCH --constraint=${CPU_FEATURE}"
 [ -n "$MEMORY" ] && MEMORY_LINE="#SBATCH --mem=${MEMORY}"
+[ -n "$NODE_LIST" ] && NODE_LINE="#SBATCH --nodelist=${NODE_LIST}"
 cat > ~/._conv_jupyter.sh << JOBSCRIPT
 #!/bin/bash
 #SBATCH --job-name=${JOB_NAME}
@@ -229,6 +421,7 @@ cat > ~/._conv_jupyter.sh << JOBSCRIPT
 #SBATCH --time=${WALL}
 ${CONSTRAINT_LINE}
 ${MEMORY_LINE}
+${NODE_LINE}
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=allaa.boutaleb@lip6.fr
 #SBATCH --output=%x-%j.out
@@ -293,6 +486,7 @@ submit_custom() {
     local job_name="$3"
     local cpu_feature="$4"
     local memory="$5"
+    local node_list="$6"
 
     echo ""
     echo -e "${BOLD}Path to your script on the cluster?${NC}"
@@ -311,7 +505,8 @@ submit_custom() {
     echo ""
     echo -e "${CYAN}Submitting ${script_path}: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
 
-    SLURM_EXTRA=$(slurm_options "$cpu_feature" "$memory")
+    SLURM_EXTRA=$(slurm_options "$cpu_feature" "$memory" "$node_list")
+    echo -e "${DIM}sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA} '${script_path}'${NC}"
     JOBID=$(ssh conv "sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA} --mail-type=ALL --mail-user=allaa.boutaleb@lip6.fr --output=%x-%j.out --error=%x-%j.err '${script_path}' 2>&1 | grep -oP 'Submitted batch job \K[0-9]+'")
 
     if [ -z "$JOBID" ] || ! is_int "$JOBID"; then
@@ -629,18 +824,19 @@ sever_tunnel() {
 # Entry point
 welcome
 
-while true; do
-    show_menu
-    read -p "> " choice
-    case $choice in
-        1) launch_session ;;
-        2) connect_existing ;;
-        3) my_jobs ;;
-        4) cancel_job ;;
-        5) cluster_status ;;
-        6) ssh conv ;;
-        7) sever_tunnel ;;
-        q|Q) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
-        *) echo -e "${RED}Invalid choice.${NC}" ;;
-    esac
+    while true; do
+        echo ""
+        render_status
+        show_menu
+        read -p "> " choice
+        case $choice in
+            1) launch_session ;;
+            2) connect_existing ;;
+            3) my_jobs ;;
+            4) cluster_status ;;
+            5) cancel_job; sever_tunnel ;;
+            6) ssh conv ;;
+            q|Q) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
+            *) echo -e "${RED}Invalid choice.${NC}" ;;
+        esac
 done

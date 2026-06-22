@@ -50,18 +50,75 @@ FUN_FACTS=(
     "Claude Shannon's 1948 paper single-handedly founded information theory."
 )
 
-welcome() {
-    local fact="${FUN_FACTS[$((RANDOM % ${#FUN_FACTS[@]}))]}"
+# parse_duration INPUT
+# Accepts: 30m, 8h, 3d, 3d 12h, 1d 6h 30m, H:M:S, bare number (hours)
+parse_duration() {
+    local input
+    input=$(printf '%s' "$*" | tr '[:upper:]' '[:lower:]')
+    input=$(printf '%s' "$input" | xargs)
+    [ -z "$input" ] && return 1
+
+    if [[ "$input" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
+        local h m s
+        IFS=':' read -r h m s <<< "$input"
+        h=$((10#$h))
+        m=$((10#$m))
+        s=$((10#$s))
+        printf "%d:%d:%d\n" "$h" "$m" "$s"
+        return 0
+    fi
+
+    local total_minutes=0
+    local matched=false
+    if [[ "$input" =~ [dhm] ]]; then
+        if [[ "$input" =~ ([0-9]+)d ]]; then
+            total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 1440 ))
+            matched=true
+        fi
+        if [[ "$input" =~ ([0-9]+)h ]]; then
+            total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 60 ))
+            matched=true
+        fi
+        if [[ "$input" =~ ([0-9]+)m ]]; then
+            total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} ))
+            matched=true
+        fi
+        $matched || return 1
+    elif [[ "$input" =~ ^[0-9]+$ ]]; then
+        total_minutes=$(( input * 60 ))
+    else
+        return 1
+    fi
+
+    local hours=$(( total_minutes / 60 ))
+    local mins=$(( total_minutes % 60 ))
+    echo "${hours}:${mins}:0"
+}
+
+spinner_step() {
+    local label="$1"
+    printf "  ${DIM}%-2s %s...${NC}" ">" "$label"
+}
+
+spinner_done() {
+    local text="$1"
+    printf "\r\033[K  ${GREEN}ok${NC} %s\n" "$text"
+}
+
+spinner_warn() {
+    local text="$1"
+    printf "\r\033[K  ${YELLOW}--${NC} %s\n" "$text"
+}
+
+render_header() {
     echo ""
     local art
     art=$(cat << 'EOF'
- _   _ ______  _____   _________ _____ _____ ___
-| | | || ___ \/  __ \ |  _| ___ \_   _|  __ \_  |
-| |_| || |_/ /| /  \/ | | | |_/ / | | | |  \/ | |
-|  _  ||  __/ | |     | | | ___ \ | | | | __  | |
-| | | || |    | \__/\ | | | |_/ /_| |_| |_\ \ | |
-\_| |_/\_|     \____/ | |_\____/ \___/ \____/_| |
-                      |___|                 |___|
+  __  ______  ______
+ / / / / __ \/ ____/
+/ /_/ / /_/ / /
+\____/ .___/_/
+    /_/
 EOF
     )
     while IFS= read -r line; do
@@ -69,23 +126,49 @@ EOF
         sleep 0.03
     done <<< "$art"
     echo ""
-    printf "  ${GREEN}HPC${NC} ${DIM}· LIP6 Cluster Manager · OAR${NC}\n"
+    printf "  ${GREEN}HPC${NC} ${DIM}· LIP6 CPU Cockpit · OAR${NC}\n"
+}
+
+render_status() {
+    echo ""
+    spinner_step "checking login"
+    if ssh -n -o BatchMode=yes -o ConnectTimeout=5 hpc "echo ok" 2>/dev/null | grep -q ok; then
+        spinner_done "login reachable"
+    else
+        spinner_warn "login unreachable"
+        return
+    fi
+
+    spinner_step "reading jobs"
+    local output jobs tunnels
+    output=$(ssh -n hpc "oarstat -u boutalebm 2>/dev/null" 2>/dev/null || true)
+    jobs=$(printf '%s\n' "$output" | awk '/^[0-9]/{c++} END{print c+0}')
+    tunnels=$(find "$TUNNEL_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')
+    spinner_done "jobs: ${jobs} active · tunnels: ${tunnels}"
+}
+
+welcome() {
+    local fact="${FUN_FACTS[$((RANDOM % ${#FUN_FACTS[@]}))]}"
+    render_header
     echo ""
     printf "  ${DIM}💡 %s${NC}\n" "$fact"
 }
 
-show_menu() {
+print_action_menu() {
     echo ""
     echo -e "${BOLD}What do you want to do?${NC}"
     echo ""
-    echo -e "  ${GREEN}1${NC})  Launch a new session"
-    echo -e "  ${GREEN}2${NC})  Reconnect to a running session"
-    echo -e "  ${GREEN}3${NC})  View my jobs"
-    echo -e "  ${GREEN}4${NC})  Cancel jobs"
+    echo -e "  ${GREEN}1${NC})  Start CPU session"
+    echo -e "  ${GREEN}2${NC})  Reconnect to running session"
+    echo -e "  ${GREEN}3${NC})  Jobs and logs"
+    echo -e "  ${GREEN}4${NC})  Cleanup jobs or tunnels"
     echo -e "  ${GREEN}5${NC})  SSH into login node"
-    echo -e "  ${GREEN}6${NC})  Disconnect tunnel"
     echo -e "  ${RED}q${NC})  Quit"
     echo ""
+}
+
+show_menu() {
+    print_action_menu
 }
 
 launch_session() {
@@ -101,13 +184,13 @@ launch_session() {
 
     echo ""
     echo -e "${BOLD}How long do you need?${NC}"
-    echo -e "  ${DIM}Press Enter for 24 hours (format: H:M:S)${NC}"
-    read -p "> " wall
-    wall="${wall:-24:0:0}"
-    if ! is_wall "$wall"; then
-        echo -e "${RED}Invalid format. Use H:M:S (e.g. 8:0:0 or 24:0:0).${NC}"
+    echo -e "  ${DIM}Press Enter for 24 hours. Examples: 8h, 1d 6h, 24:0:0${NC}"
+    read -p "> " wall_input
+    wall_input="${wall_input:-24h}"
+    wall=$(parse_duration "$wall_input") || {
+        echo -e "${RED}Invalid duration. Use 8h, 1d 6h, 30m, or H:M:S.${NC}"
         return
-    fi
+    }
 
     echo ""
     echo -e "${BOLD}How do you want to work?${NC}"
@@ -124,6 +207,7 @@ launch_session() {
 
     echo ""
     echo -e "${CYAN}Submitting job: ${cores} cores, ${wall}...${NC}"
+    echo -e "${DIM}oarsub -l /nodes=1/core=${cores},walltime=${wall} -p \"host like 'big%'\"${NC}"
 
     if [ "$mode" = "2" ]; then
         echo ""
@@ -435,15 +519,16 @@ sever_tunnel() {
 welcome
 
 while true; do
+    echo ""
+    render_status
     show_menu
     read -p "> " choice
     case $choice in
         1) launch_session ;;
         2) connect_existing ;;
         3) my_jobs ;;
-        4) cancel_job ;;
+        4) cancel_job; sever_tunnel ;;
         5) ssh hpc ;;
-        6) sever_tunnel ;;
         q|Q) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
         *) echo -e "${RED}Invalid choice.${NC}" ;;
     esac

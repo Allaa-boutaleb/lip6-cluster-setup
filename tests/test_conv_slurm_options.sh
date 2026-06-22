@@ -12,6 +12,8 @@ extract_function() {
 }
 
 eval "$(extract_function is_mem)"
+eval "$(extract_function is_conv_node)"
+eval "$(extract_function node_matches_gpu)"
 eval "$(extract_function slurm_options)"
 
 assert_eq() {
@@ -42,11 +44,25 @@ is_mem 0
 ! is_mem 512GB
 ! is_mem abc
 
-assert_eq "" "$(slurm_options "" "")" "empty options"
-assert_eq " --constraint=amd" "$(slurm_options amd "")" "cpu constraint"
-assert_eq " --mem=512G" "$(slurm_options "" 512G)" "memory"
-assert_eq " --mem=512G" "$(slurm_options "" 512g)" "lowercase memory"
-assert_eq " --constraint=intel --mem=128G" "$(slurm_options intel 128G)" "cpu and memory"
+assert_eq "" "$(slurm_options "" "" "")" "empty options"
+assert_eq " --constraint=amd" "$(slurm_options amd "" "")" "cpu constraint"
+assert_eq " --mem=512G" "$(slurm_options "" 512G "")" "memory"
+assert_eq " --mem=512G" "$(slurm_options "" 512g "")" "lowercase memory"
+assert_eq " --constraint=intel --mem=128G" "$(slurm_options intel 128G "")" "cpu and memory"
+assert_eq " --nodelist=node03" "$(slurm_options "" "" node03)" "node list"
+assert_eq " --constraint=intel --mem=128G --nodelist=node03" "$(slurm_options intel 128G node03)" "cpu memory and node"
+
+is_conv_node node01
+is_conv_node node10
+! is_conv_node node00
+! is_conv_node node11
+! is_conv_node node7
+! is_conv_node front
+
+node_matches_gpu node03 a100_7g.80gb
+node_matches_gpu node07 a100_3g.40gb
+! node_matches_gpu node07 a100_7g.80gb
+! node_matches_gpu node03 a100_3g.40gb
 
 conv_template_header=$(awk '
     /^CONV_USER=/ { found=1 }
@@ -54,6 +70,8 @@ conv_template_header=$(awk '
     found && /^# parse_duration INPUT/ { exit }
 ' lip6-cluster-setup)
 printf '%s\n' "$conv_template_header" | grep -q '^is_mem()'
+printf '%s\n' "$conv_template_header" | grep -q '^is_conv_node()'
+printf '%s\n' "$conv_template_header" | grep -q '^node_matches_gpu()'
 printf '%s\n' "$conv_template_header" | grep -q '^slurm_options()'
 grep -q '~/.venvs/conv_jupyter/bin/jupyter' lip6-cluster-setup
 grep -q 'source ~/.venvs/conv_jupyter/bin/activate' lip6-cluster-setup
