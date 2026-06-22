@@ -13,7 +13,8 @@ for label in \
     "Reconnect to running session" \
     "Jobs and logs" \
     "Cluster status" \
-    "Cleanup jobs or tunnels"; do
+    "Cleanup jobs or tunnels" \
+    "Refresh cached status"; do
     grep -q "$label" conv-manager || fail "standalone conv missing: $label"
     grep -q "$label" lip6-cluster-setup || fail "installer conv template missing: $label"
 done
@@ -22,7 +23,8 @@ for label in \
     "Start CPU session" \
     "Reconnect to running session" \
     "Jobs and logs" \
-    "Cleanup jobs or tunnels"; do
+    "Cleanup jobs or tunnels" \
+    "Refresh cached status"; do
     grep -q "$label" hpc-notebook || fail "standalone hpc missing: $label"
     grep -q "$label" lip6-cluster-setup || fail "installer hpc template missing: $label"
 done

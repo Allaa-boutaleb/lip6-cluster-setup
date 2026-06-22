@@ -16,6 +16,11 @@ NC='\033[0m'
 TUNNEL_DIR="/tmp/jupyter_tunnels_$(whoami)"
 mkdir -p "$TUNNEL_DIR" 2>/dev/null
 
+STATUS_LOGIN="not checked"
+STATUS_JOBS="not checked"
+STATUS_TUNNELS="0"
+STATUS_UPDATED="never"
+
 # Find a free local port for SSH tunneling
 find_free_port() {
     python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'
@@ -110,41 +115,92 @@ spinner_warn() {
     printf "\r\033[K  ${YELLOW}--${NC} %s\n" "$text"
 }
 
+run_spinner() {
+    local label="$1"
+    shift
+    local tmp="${TMPDIR:-/tmp}/lip6-spinner.$$.$RANDOM"
+    local frames='|/-\'
+    local i=0
+    local pid rc
+
+    "$@" > "${tmp}.out" 2> "${tmp}.err" &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r\033[K  ${CYAN}%s${NC} %s" "${frames:$((i % 4)):1}" "$label" >&2
+        i=$((i + 1))
+        sleep 0.12
+    done
+    wait "$pid"
+    rc=$?
+    printf "\r\033[K" >&2
+    cat "${tmp}.out"
+    if [ "$rc" -ne 0 ] && [ -s "${tmp}.err" ]; then
+        cat "${tmp}.err" >&2
+    fi
+    rm -f "${tmp}.out" "${tmp}.err"
+    return "$rc"
+}
+
 render_header() {
     echo ""
     local art
     art=$(cat << 'EOF'
-  __  ______  ______
- / / / / __ \/ ____/
-/ /_/ / /_/ / /
-\____/ .___/_/
-    /_/
+ ██    ██  ██████▒     ▒████▒
+ ██    ██  ███████▒   ▓██████
+ ██    ██  ██   ▒██  ▒██▒  ░█
+ ██    ██  ██    ██  ██▓
+ ██    ██  ██   ▒██  ██░
+ ████████  ███████▒  ██
+ ████████  ██████▒   ██
+ ██    ██  ██        ██░
+ ██    ██  ██        ██▓
+ ██    ██  ██        ▒██▒  ░█
+ ██    ██  ██         ▓██████
+ ██    ██  ██          ▒████▒
 EOF
     )
     while IFS= read -r line; do
         printf "  ${CYAN}%s${NC}\n" "$line"
-        sleep 0.03
     done <<< "$art"
     echo ""
     printf "  ${GREEN}HPC${NC} ${DIM}· LIP6 CPU Cockpit · OAR${NC}\n"
 }
 
-render_status() {
-    echo ""
-    spinner_step "checking login"
-    if ssh -n -o BatchMode=yes -o ConnectTimeout=5 hpc "echo ok" 2>/dev/null | grep -q ok; then
-        spinner_done "login reachable"
-    else
-        spinner_warn "login unreachable"
+collect_status() {
+    local output jobs tunnels
+    output=$(ssh -n -o BatchMode=yes -o ConnectTimeout=3 hpc "printf 'login|reachable\n'; oarstat -u boutalebm 2>/dev/null" 2>/dev/null || true)
+    if ! printf '%s\n' "$output" | grep -q '^login|reachable$'; then
+        printf "login|unreachable\n"
+        printf "jobs|not available\n"
+        printf "tunnels|%s\n" "$(find "$TUNNEL_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')"
         return
     fi
 
-    spinner_step "reading jobs"
-    local output jobs tunnels
-    output=$(ssh -n hpc "oarstat -u boutalebm 2>/dev/null" 2>/dev/null || true)
+    printf "login|reachable\n"
     jobs=$(printf '%s\n' "$output" | awk '/^[0-9]/{c++} END{print c+0}')
     tunnels=$(find "$TUNNEL_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')
-    spinner_done "jobs: ${jobs} active · tunnels: ${tunnels}"
+    printf "jobs|%s active\n" "$jobs"
+    printf "tunnels|%s\n" "$tunnels"
+}
+
+refresh_status() {
+    local data line key value
+    data=$(run_spinner "refreshing HPC status" collect_status || true)
+    while IFS='|' read -r key value; do
+        case "$key" in
+            login) STATUS_LOGIN="$value" ;;
+            jobs) STATUS_JOBS="$value" ;;
+            tunnels) STATUS_TUNNELS="$value" ;;
+        esac
+    done <<< "$data"
+    STATUS_UPDATED=$(date '+%H:%M:%S' 2>/dev/null || date)
+}
+
+render_status() {
+    echo ""
+    printf "  ${BOLD}Status${NC} ${DIM}(cached %s, press r to refresh)${NC}\n" "$STATUS_UPDATED"
+    printf "  ${GREEN}login${NC}: %s  ${GREEN}jobs${NC}: %s  ${GREEN}tunnels${NC}: %s\n" \
+        "$STATUS_LOGIN" "$STATUS_JOBS" "$STATUS_TUNNELS"
 }
 
 welcome() {
@@ -163,6 +219,7 @@ print_action_menu() {
     echo -e "  ${GREEN}3${NC})  Jobs and logs"
     echo -e "  ${GREEN}4${NC})  Cleanup jobs or tunnels"
     echo -e "  ${GREEN}5${NC})  SSH into login node"
+    echo -e "  ${CYAN}r${NC})  Refresh cached status"
     echo -e "  ${RED}q${NC})  Quit"
     echo ""
 }
@@ -517,6 +574,7 @@ sever_tunnel() {
 
 # Entry point
 welcome
+refresh_status
 
 while true; do
     echo ""
@@ -529,6 +587,7 @@ while true; do
         3) my_jobs ;;
         4) cancel_job; sever_tunnel ;;
         5) ssh hpc ;;
+        r|R) refresh_status ;;
         q|Q) echo -e "\n${DIM}Bye!${NC}\n"; exit 0 ;;
         *) echo -e "${RED}Invalid choice.${NC}" ;;
     esac
