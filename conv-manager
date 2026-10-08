@@ -13,7 +13,8 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-CONV_USER="boutalebm"
+# Job mail recipient; lip6-cluster-setup fills this in (empty = no mail)
+MAIL_TO=""
 TUNNEL_DIR="/tmp/jupyter_tunnels_$(whoami)"
 mkdir -p "$TUNNEL_DIR" 2>/dev/null
 
@@ -239,7 +240,7 @@ EOF
 
 collect_status() {
     local raw running pending tunnels
-    raw=$(ssh -n -o BatchMode=yes -o ConnectTimeout=3 conv "printf 'front|reachable\n'; squeue -h -u ${CONV_USER} -o '%T|%R' 2>/dev/null" 2>/dev/null || true)
+    raw=$(ssh -n -o BatchMode=yes -o ConnectTimeout=3 conv "printf 'front|reachable\n'; squeue -h -u \"\$USER\" -o '%T|%R' 2>/dev/null" 2>/dev/null || true)
     if ! printf '%s\n' "$raw" | grep -q '^front|reachable$'; then
         printf "front|unreachable\n"
         printf "jobs|not available\n"
@@ -453,7 +454,7 @@ launch_session() {
         spinner_done "Jupyter env ready"
     fi
 
-    JOBID=$(ssh conv bash -s "$num_gpus" "$GPU_TYPE" "$wall" "$job_name" "$CPU_FEATURE" "$MEMORY" "$NODE_LIST" << 'REMOTE'
+    JOBID=$(ssh conv bash -s "'$num_gpus'" "'$GPU_TYPE'" "'$wall'" "'$job_name'" "'$CPU_FEATURE'" "'$MEMORY'" "'$NODE_LIST'" "'$MAIL_TO'" << 'REMOTE'
 NUM_GPUS="$1"
 GPU_TYPE="$2"
 WALL="$3"
@@ -461,12 +462,15 @@ JOB_NAME="$4"
 CPU_FEATURE="$5"
 MEMORY="$6"
 NODE_LIST="$7"
+MAIL="$8"
 CONSTRAINT_LINE=""
 MEMORY_LINE=""
 NODE_LINE=""
+MAIL_LINE=""
 [ -n "$CPU_FEATURE" ] && CONSTRAINT_LINE="#SBATCH --constraint=${CPU_FEATURE}"
 [ -n "$MEMORY" ] && MEMORY_LINE="#SBATCH --mem=${MEMORY}"
 [ -n "$NODE_LIST" ] && NODE_LINE="#SBATCH --nodelist=${NODE_LIST}"
+[ -n "$MAIL" ] && MAIL_LINE=$(printf '#SBATCH --mail-type=ALL\n#SBATCH --mail-user=%s' "$MAIL")
 cat > ~/._conv_jupyter.sh << JOBSCRIPT
 #!/bin/bash
 #SBATCH --job-name=${JOB_NAME}
@@ -476,8 +480,7 @@ cat > ~/._conv_jupyter.sh << JOBSCRIPT
 ${CONSTRAINT_LINE}
 ${MEMORY_LINE}
 ${NODE_LINE}
-#SBATCH --mail-type=ALL
-#SBATCH --mail-user=allaa.boutaleb@lip6.fr
+${MAIL_LINE}
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 
@@ -560,8 +563,10 @@ submit_custom() {
     echo -e "${CYAN}Submitting ${script_path}: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
 
     SLURM_EXTRA=$(slurm_options "$cpu_feature" "$memory" "$node_list")
+    local mail_opts=""
+    [ -n "$MAIL_TO" ] && mail_opts=" --mail-type=ALL --mail-user='${MAIL_TO}'"
     echo -e "${DIM}sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA} '${script_path}'${NC}"
-    JOBID=$(ssh conv "sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA} --mail-type=ALL --mail-user=allaa.boutaleb@lip6.fr --output=%x-%j.out --error=%x-%j.err '${script_path}' 2>&1 | grep -oP 'Submitted batch job \K[0-9]+'")
+    JOBID=$(ssh conv "sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA}${mail_opts} --output=%x-%j.out --error=%x-%j.err '${script_path}' 2>&1 | grep -oP 'Submitted batch job \K[0-9]+'")
 
     if [ -z "$JOBID" ] || ! is_int "$JOBID"; then
         echo -e "${RED}Failed to submit job.${NC}"
@@ -661,7 +666,7 @@ my_jobs() {
     echo -e "${DIM}Loading, please wait...${NC}"
 
     local raw
-    raw=$(ssh conv bash -c "\"squeue -h -u ${CONV_USER} -o '%i|%j|%T|%M|%l|%L|%R'\"" 2>/dev/null)
+    raw=$(ssh conv bash -c "\"squeue -h -u \$USER -o '%i|%j|%T|%M|%l|%L|%R'\"" 2>/dev/null)
 
     if [ -z "$raw" ]; then
         echo -e "${DIM}No running jobs.${NC}"
@@ -717,7 +722,7 @@ cancel_job() {
     echo -e "${DIM}Loading, please wait...${NC}"
 
     local raw
-    raw=$(ssh conv bash -c "\"squeue -h -u ${CONV_USER} -o '%i|%j|%T|%M|%l|%R'\"" 2>/dev/null)
+    raw=$(ssh conv bash -c "\"squeue -h -u \$USER -o '%i|%j|%T|%M|%l|%R'\"" 2>/dev/null)
 
     if [ -z "$raw" ]; then
         echo -e "${DIM}No running jobs to cancel.${NC}"
@@ -736,7 +741,7 @@ cancel_job() {
     echo -e "Enter a job ID to cancel, or ${BOLD}all${NC} to cancel everything."
     read -p "> " jobid
     if [ "$jobid" = "all" ]; then
-        ssh conv "bash -c 'for jid in \$(squeue -h -u ${CONV_USER} -o \"%i\"); do rm -f ~/*-\${jid}.out ~/*-\${jid}.err; done; scancel -u ${CONV_USER}'" 2>/dev/null
+        ssh conv "bash -c 'for jid in \$(squeue -h -u \$USER -o \"%i\"); do rm -f ~/*-\${jid}.out ~/*-\${jid}.err; done; scancel -u \$USER'" 2>/dev/null
         echo -e "${GREEN}All jobs cancelled and log files cleaned up.${NC}"
     elif is_int "$jobid"; then
         ssh conv "scancel '$jobid'; rm -f ~/*-'${jobid}'.out ~/*-'${jobid}'.err" 2>/dev/null
@@ -761,7 +766,7 @@ connect_existing() {
     echo -e "${DIM}Loading, please wait...${NC}"
 
     local raw
-    raw=$(ssh conv bash -c "\"squeue -h -u ${CONV_USER} -o '%i|%j|%T|%M|%l|%L|%R'\"" 2>/dev/null)
+    raw=$(ssh conv bash -c "\"squeue -h -u \$USER -o '%i|%j|%T|%M|%l|%L|%R'\"" 2>/dev/null)
 
     if [ -z "$raw" ]; then
         echo -e "${DIM}No running jobs to connect to.${NC}"

@@ -32,7 +32,7 @@ The interactive wizard handles everything automatically:
 | **SSH key generation** | Creates an ed25519 key if you don't have one |
 | **SSH config** | Sets up ProxyJump through the LIP6 gateway with `IdentitiesOnly yes` |
 | **Key distribution** | Copies your public key to the gateway, HPC, and Convergence login nodes |
-| **Manager scripts** | Installs `~/hpc-notebook` and `~/conv-manager` on your local machine |
+| **Manager scripts** | Copies `hpc-notebook` and `conv-manager` from this repo to `~/hpc-notebook` and `~/conv-manager`, filling in your email for job notifications |
 | **Shell aliases** | Adds `hpc` and `conv` aliases to your shell (bash, zsh, or fish) |
 | **Remote config** | Adds removable marked `.bashrc` blocks with helpful aliases |
 
@@ -219,7 +219,7 @@ PENDING
 - The managers show compact status probes before the action menu
 - Job wait loops print queue state while waiting
 - SSH operations show `Loading, please wait...` so you know it's working
-- Press **Ctrl+C** while waiting for a job to queue — you'll get an email when it starts and can reconnect later
+- Press **Ctrl+C** while waiting for a job to queue — the job keeps running, you'll get an email (at the address you gave the installer) when it starts, and you can reconnect later
 
 ### Login Safety
 
@@ -263,14 +263,13 @@ conv-status     # Cluster GPU usage
 
 ## Refreshing the Managers
 
-If you've updated the repo (e.g. `git pull`) and want the latest scripts without re-running the full setup:
+If you've updated the repo (e.g. `git pull`), re-run the installer from the repo:
 
 ```bash
-cp ~/lip6-cluster-setup/conv-manager ~/conv-manager
-cp ~/lip6-cluster-setup/hpc-notebook ~/hpc-notebook
+./lip6-cluster-setup
 ```
 
-That's it — the `conv` and `hpc` aliases already point to these files.
+It copies the latest `conv-manager` and `hpc-notebook` over `~/conv-manager` and `~/hpc-notebook` and puts your email back in. Don't copy the files by hand: the repo versions have no email set, so job notifications would stop.
 
 ---
 

@@ -64,22 +64,11 @@ node_matches_gpu node07 a100_3g.40gb
 ! node_matches_gpu node07 a100_7g.80gb
 ! node_matches_gpu node03 a100_3g.40gb
 
-conv_template_header=$(awk '
-    /^CONV_USER=/ { found=1 }
-    found { print }
-    found && /^# parse_duration INPUT/ { exit }
-' lip6-cluster-setup)
-printf '%s\n' "$conv_template_header" | grep -q '^is_mem()'
-printf '%s\n' "$conv_template_header" | grep -q '^is_conv_node()'
-printf '%s\n' "$conv_template_header" | grep -q '^node_matches_gpu()'
-printf '%s\n' "$conv_template_header" | grep -q '^slurm_options()'
-grep -q '~/.venvs/conv_jupyter/bin/jupyter' lip6-cluster-setup
-grep -q 'source ~/.venvs/conv_jupyter/bin/activate' lip6-cluster-setup
+grep -q '~/.venvs/conv_jupyter/bin/jupyter' conv-manager
+grep -q 'source ~/.venvs/conv_jupyter/bin/activate' conv-manager
 
 assert_not_contains 'CPU_FEATURE=""' conv-manager
 assert_not_contains 'CPU vendor.*Auto\|)  Auto' conv-manager
-assert_not_contains 'CPU_FEATURE=""' lip6-cluster-setup
-assert_not_contains 'CPU vendor.*Auto\|)  Auto' lip6-cluster-setup
-assert_not_contains 'pip install --quiet jupyterlab' lip6-cluster-setup
+assert_not_contains 'pip install --quiet jupyterlab' conv-manager
 
 echo "ok"
