@@ -2,7 +2,7 @@
 # Test stub for ssh. It never connects anywhere: it drops the options and the host and runs the remote
 # command locally, the way a remote shell would (argv joined with spaces, then re-split), stdin passed through.
 # Knobs: FAKE_SSH=down -> "connection timed out", exit 255; FAKE_SSH_DOWN="hpc conv" -> the same for those hosts only.
-# FAKE_SESSION_RC -> exit status of a login (no command).
+# FAKE_SESSION_RC -> exit status of a login (no command). FAKE_TUNNEL=fail -> an -N tunnel fails to bind.
 echo "ssh $*" >> "${FAKE_LOG:-/dev/null}"
 if [ "$FAKE_SSH" = down ]; then
     echo "ssh: connect to host fake port 22: Connection timed out" >&2
@@ -13,6 +13,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -O) exit 0 ;;
         -N) tunnel=1; shift ;;
+        -L) fwd=$2; shift 2 ;;
         -[oJLRDpilFSEbcmwWBIQ]) shift 2 ;;
         -*) shift ;;
         *) break ;;
@@ -23,6 +24,11 @@ shift
 case " ${FAKE_SSH_DOWN:-} " in
     *" $host "*) echo "ssh: connect to host $host port 22: Connection timed out" >&2; exit 255 ;;
 esac
-[ -n "$tunnel" ] && exec /bin/sleep 86400
+if [ -n "$tunnel" ]; then
+    # a tunnel: listen on its local port (accept and drop) so readiness checks see it, for 30 s at most
+    port=${fwd#127.0.0.1:}
+    [ "${FAKE_TUNNEL:-}" != fail ] || { echo "bind [127.0.0.1]:${port%%:*}: Address already in use" >&2; exit 255; }
+    exec perl -MIO::Socket::INET -e 'alarm 30; my $s = IO::Socket::INET->new(LocalAddr => "127.0.0.1", LocalPort => $ARGV[0], Listen => 5, ReuseAddr => 1) or die "bind: $!\n"; while (my $c = $s->accept) { close $c }' "${port%%:*}"
+fi
 [ $# -gt 0 ] || exit "${FAKE_SESSION_RC:-0}"
 exec /bin/bash -c "$*"

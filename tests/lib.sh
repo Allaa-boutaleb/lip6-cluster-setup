@@ -11,6 +11,7 @@ T=$(mktemp -d "${TMPDIR:-/tmp}/lip6-test.XXXXXX")
 trap 'rm -rf "$T" "/tmp/jupyter_tunnels_fake-tester"' EXIT
 mkdir -p "$T/home" "$T/state"
 export HOME="$T/home" TMPDIR="$T" FAKE_STATE="$T/state" FAKE_LOG="$T/calls.log"
+unset XDG_STATE_HOME LIP6_NO_MUX
 export PATH="$FAKE_BIN:$PATH"
 [ "$(command -v ssh)" = "$FAKE_BIN/ssh" ] || fail "ssh is not tests/fake-bin/ssh: refusing to run"
 
@@ -18,7 +19,7 @@ export PATH="$FAKE_BIN:$PATH"
 new_case() {
     CASE=$1
     : > "$FAKE_STATE/jobs"; : > "$FAKE_LOG"
-    unset FAKE_SSH FAKE_SSH_DOWN FAKE_SESSION_RC FAKE_SBATCH FAKE_SQUEUE FAKE_SINFO FAKE_SCANCEL FAKE_SCANCEL_IDS FAKE_OARSUB \
+    unset FAKE_SSH FAKE_SSH_DOWN FAKE_TUNNEL FAKE_SESSION_RC FAKE_SBATCH FAKE_SQUEUE FAKE_SINFO FAKE_SCANCEL FAKE_SCANCEL_IDS FAKE_OARSUB \
         FAKE_OARSTAT FAKE_OARDEL FAKE_OARDEL_IDS FAKE_NEW_STATE FAKE_CLUSTER
     [ "$HOME" = "$T/home" ] || fail "HOME is not the sandbox: refusing to clean it"
     rm -rf "$HOME"; mkdir -p "$HOME"
