@@ -177,6 +177,25 @@ has 'Job 4242 submitted.'
 has 'no longer waiting (state: Error)'
 survives
 
+new_case "limits are refused before anything is submitted"
+run_tool conv-manager 1 1 '' 15d q
+has 'at most 14 days'
+run_tool conv-manager 1 1 '' '' '' 2 '' node03 q
+has 'node03 does not have amd CPUs'
+run_tool hpc-notebook 1 49 q
+has 'from 1 to 48'
+run_tool hpc-notebook 1 '' 25h 2 q
+has 'at most 24 hours'
+survives
+! grep -Eq 'sbatch|salloc|oarsub' "$FAKE_LOG" || fail "a refused request reached the scheduler"
+
+new_case "narrow terminal: one-line title instead of the logo"
+COLUMNS=80 run_tool conv-manager q
+lacks '▒████▒   ░████░'
+has 'CONVERGENCE'
+COLUMNS=120 run_tool conv-manager q
+has '▒████▒   ░████░'
+
 new_case "hpc Ctrl-D at the menu and inside a question"
 run_tool hpc-notebook
 [ "$RC" = 0 ] || fail "exit status $RC, expected 0"

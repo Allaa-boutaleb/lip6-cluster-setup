@@ -14,6 +14,7 @@ extract_function() {
 eval "$(extract_function is_mem)"
 eval "$(extract_function is_conv_node)"
 eval "$(extract_function node_matches_gpu)"
+eval "$(extract_function node_matches_cpu)"
 eval "$(extract_function slurm_options)"
 
 assert_eq() {
@@ -51,6 +52,7 @@ assert_eq " --mem=512G" "$(slurm_options "" 512g "")" "lowercase memory"
 assert_eq " --constraint=intel --mem=128G" "$(slurm_options intel 128G "")" "cpu and memory"
 assert_eq " --nodelist=node03" "$(slurm_options "" "" node03)" "node list"
 assert_eq " --constraint=intel --mem=128G --nodelist=node03" "$(slurm_options intel 128G node03)" "cpu memory and node"
+assert_eq " --nodelist=node03 --qos=long" "$(slurm_options "" "" node03 long)" "qos"
 
 is_conv_node node01
 is_conv_node node10
@@ -63,6 +65,10 @@ node_matches_gpu node03 a100_7g.80gb
 node_matches_gpu node07 a100_3g.40gb
 ! node_matches_gpu node07 a100_7g.80gb
 ! node_matches_gpu node03 a100_3g.40gb
+node_matches_cpu node01 amd
+node_matches_cpu node03 intel
+! node_matches_cpu node01 intel
+! node_matches_cpu node08 amd
 
 grep -q '~/.venvs/conv_jupyter/bin/jupyter' conv-manager
 grep -q 'source ~/.venvs/conv_jupyter/bin/activate' conv-manager

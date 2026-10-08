@@ -38,17 +38,19 @@ eval "$(extract_function parse_duration hpc-notebook)"
 assert_eq "8:0:0" "$(parse_duration 8h)" "hpc 8h"
 assert_eq "30:30:0" "$(parse_duration 1d 6h 30m)" "hpc compound duration"
 assert_eq "8:0:0" "$(parse_duration 08:00:00)" "hpc leading zero H:M:S"
+assert_eq "8:0:0" "$(parse_duration 08h)" "hpc 08h is decimal"
 assert_fails "hpc invalid duration" parse_duration soon
 unset -f parse_duration
 
 eval "$(extract_function parse_duration conv-manager)"
-eval "$(extract_function duration_to_minutes conv-manager)"
+eval "$(extract_function slurm_qos conv-manager)"
 assert_eq "08:00:00" "$(parse_duration 8h)" "conv 8h"
 assert_eq "1-06:30:00" "$(parse_duration 1d 6h 30m)" "conv compound duration"
 assert_eq "08:00:00" "$(parse_duration 08:00:00)" "conv leading zero HH:MM:SS"
 assert_eq "1-06:00:00" "$(parse_duration 30:00:00)" "conv long HH:MM:SS"
-assert_eq "480" "$(duration_to_minutes 08:00:00)" "conv minutes leading zero"
-assert_eq "1800" "$(duration_to_minutes 30:00:00)" "conv minutes long HH:MM:SS"
+assert_eq "1-10:00:00" "$(parse_duration 1d 010h)" "conv 010h is decimal"
+assert_eq "short normal long" "$(slurm_qos 1-00:00:00) $(slurm_qos 1-00:01:00) $(slurm_qos 14-00:00:00)" "conv QoS from duration"
+assert_fails "conv over 14 days" slurm_qos 14-00:00:01
 assert_fails "conv invalid duration" parse_duration soon
 
 if grep -q '\${\*,,}' conv-manager hpc-notebook lip6-cluster-setup; then

@@ -35,7 +35,7 @@ if [ "$PLATFORM" != gitbash ] && [ "${LIP6_NO_MUX:-}" != 1 ]; then
     SSH_MUX=(-o ControlMaster=auto -o "ControlPath=~/.ssh/cm-%C" -o ControlPersist=10m
         -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=10)
 fi
-rssh() { ssh ${SSH_MUX[@]+"${SSH_MUX[@]}"} "$@"; }
+rssh() { ssh "${SSH_MUX[@]}" "$@"; }
 
 # Open tunnels, one file per job: "pid local_port target" (and the tunnel's ssh output in <job>.log)
 TUNNEL_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/lip6-cluster/tunnels"
@@ -209,15 +209,38 @@ node_matches_gpu() {
     esac
 }
 
+# node01 is the only AMD node; the others are Intel
+node_matches_cpu() {
+    case "$1" in
+        node01) [ "$2" = amd ] ;;
+        *) [ "$2" = intel ] ;;
+    esac
+}
+
+# slurm_qos WALL: the QoS for a parse_duration result: short up to 1 day, normal up to 7, long up to 14; fails beyond
+slurm_qos() {
+    local d=0 h m s secs
+    case $1 in *-*) d=${1%%-*} ;; esac
+    IFS=: read -r h m s <<< "${1#*-}"
+    secs=$(( ((10#$d * 24 + 10#$h) * 60 + 10#$m) * 60 + 10#$s ))
+    if [ $secs -le 86400 ]; then echo short
+    elif [ $secs -le 604800 ]; then echo normal
+    elif [ $secs -le 1209600 ]; then echo long
+    else return 1
+    fi
+}
+
 slurm_options() {
     local cpu_feature="$1"
     local memory="$2"
     local node="$3"
+    local qos="$4"
     local opts=""
     memory=$(printf '%s' "$memory" | tr '[:lower:]' '[:upper:]')
     [ -n "$cpu_feature" ] && opts="${opts} --constraint=${cpu_feature}"
     [ -n "$memory" ] && opts="${opts} --mem=${memory}"
     [ -n "$node" ] && opts="${opts} --nodelist=${node}"
+    [ -n "$qos" ] && opts="${opts} --qos=${qos}"
     echo "$opts"
 }
 
@@ -272,20 +295,20 @@ parse_duration() {
     local matched=false
     if [[ "$input" =~ [dhm] ]]; then
         if [[ "$input" =~ ([0-9]+)d ]]; then
-            total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 1440 ))
+            total_minutes=$(( total_minutes + 10#${BASH_REMATCH[1]} * 1440 ))
             matched=true
         fi
         if [[ "$input" =~ ([0-9]+)h ]]; then
-            total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 60 ))
+            total_minutes=$(( total_minutes + 10#${BASH_REMATCH[1]} * 60 ))
             matched=true
         fi
         if [[ "$input" =~ ([0-9]+)m ]]; then
-            total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} ))
+            total_minutes=$(( total_minutes + 10#${BASH_REMATCH[1]} ))
             matched=true
         fi
         $matched || return 1
     elif [[ "$input" =~ ^[0-9]+$ ]]; then
-        total_minutes=$(( input * 60 ))
+        total_minutes=$(( 10#$input * 60 ))
     else
         return 1
     fi
@@ -301,37 +324,6 @@ parse_duration() {
     fi
 }
 
-duration_to_minutes() {
-    local input
-    input=$(printf '%s' "$*" | tr '[:upper:]' '[:lower:]')
-    input=$(printf '%s' "$input" | xargs)
-    [ -z "$input" ] && echo "0" && return
-
-    if [[ "$input" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
-        local h m s
-        IFS=':' read -r h m s <<< "$input"
-        h=$((10#$h))
-        m=$((10#$m))
-        s=$((10#$s))
-        echo $(( h * 60 + m ))
-        return
-    fi
-
-    local total_minutes=0
-    if [[ "$input" =~ ([0-9]+)d ]]; then
-        total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 1440 ))
-    fi
-    if [[ "$input" =~ ([0-9]+)h ]]; then
-        total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} * 60 ))
-    fi
-    if [[ "$input" =~ ([0-9]+)m ]]; then
-        total_minutes=$(( total_minutes + ${BASH_REMATCH[1]} ))
-    fi
-    if [[ "$input" =~ ^[0-9]+$ ]]; then
-        total_minutes=$(( input * 60 ))
-    fi
-    echo "$total_minutes"
-}
 
 spinner_step() {
     local label="$1"
@@ -392,10 +384,14 @@ render_header() {
    ▒████▒   ░████░   ██   ███    ▓██▓    ████████  ██    ███   ▒████░  ████████  ██   ███    ▒████▒  ████████
 EOF
     )
-    while IFS= read -r line; do
-        printf "  ${PURPLE}%s${NC}\n" "$line"
-    done <<< "$art"
-    echo ""
+    # the logo needs 111 columns; a narrower terminal gets only the one-line title
+    local cols=${COLUMNS:-$(stty size 2>/dev/null </dev/tty | cut -d' ' -f2)}
+    if [ "${cols:-80}" -ge 111 ] 2>/dev/null; then
+        while IFS= read -r line; do
+            printf "  ${PURPLE}%s${NC}\n" "$line"
+        done <<< "$art"
+        echo ""
+    fi
     printf "  ${GREEN}CONVERGENCE${NC} ${DIM}· LIP6 GPU Cockpit · Slurm · A100${NC}\n"
 }
 
@@ -492,9 +488,9 @@ pick_node_for_gpu_type() {
     echo -e "${BOLD}Pin to an exact node?${NC}"
     echo -e "  ${DIM}Press Enter to let Slurm choose.${NC}"
     if [ "$gpu_type" = "a100_7g.80gb" ]; then
-        echo -e "  ${DIM}Full A100 nodes: node01-node06${NC}"
+        echo -e "  ${DIM}Full A100 nodes: node01 (AMD), node02-node06 (Intel)${NC}"
     else
-        echo -e "  ${DIM}MIG nodes: node07-node10${NC}"
+        echo -e "  ${DIM}MIG nodes: node07-node10 (Intel)${NC}"
     fi
     ask "> " node_choice
     [ -z "$node_choice" ] && return 0
@@ -504,6 +500,10 @@ pick_node_for_gpu_type() {
     fi
     if ! node_matches_gpu "$node_choice" "$gpu_type"; then
         echo -e "${RED}${node_choice} does not match the selected GPU type.${NC}"
+        return 1
+    fi
+    if ! node_matches_cpu "$node_choice" "$CPU_FEATURE"; then
+        echo -e "${RED}${node_choice} does not have ${CPU_FEATURE} CPUs (node01 is AMD, the others Intel).${NC}"
         return 1
     fi
     NODE_LIST="$node_choice"
@@ -517,10 +517,13 @@ launch_session() {
     echo -e "  ${DIM}Press Enter for 1 (max 4 per node for full, 8 for MIG)${NC}"
     ask "> " num_gpus
     num_gpus="${num_gpus:-1}"
-    if ! is_int "$num_gpus"; then
-        echo -e "${RED}GPU count must be a number (e.g. 1, 2, 4).${NC}"
+    local max_gpus=4
+    [ "$GPU_TYPE" = "a100_3g.40gb" ] && max_gpus=8
+    if ! is_int "$num_gpus" || [ $((10#$num_gpus)) -lt 1 ] || [ $((10#$num_gpus)) -gt $max_gpus ]; then
+        echo -e "${RED}GPU count must be a number from 1 to ${max_gpus}.${NC}"
         return
     fi
+    num_gpus=$((10#$num_gpus))
 
     echo ""
     echo -e "${BOLD}How long do you need?${NC}"
@@ -529,6 +532,10 @@ launch_session() {
     wall_input="${wall_input:-8h}"
     wall=$(parse_duration "$wall_input") || {
         echo -e "${RED}Invalid duration. Use 8h, 1d 6h, 30m, or HH:MM:SS.${NC}"
+        return
+    }
+    QOS=$(slurm_qos "$wall") || {
+        echo -e "${RED}Too long: Convergence jobs can run at most 14 days.${NC}"
         return
     }
 
@@ -589,7 +596,7 @@ launch_session() {
         return
     fi
 
-    SLURM_EXTRA=$(slurm_options "$CPU_FEATURE" "$MEMORY" "$NODE_LIST")
+    SLURM_EXTRA=$(slurm_options "$CPU_FEATURE" "$MEMORY" "$NODE_LIST" "$QOS")
 
     if [ "$mode" = "2" ]; then
         echo ""
@@ -611,7 +618,7 @@ launch_session() {
     # One ssh: install Jupyter if missing, write the job script, submit. sbatch --parsable prints just the
     # job id; on rejection its message comes back instead.
     local out rc
-    out=$(rssh conv bash -s "'$num_gpus'" "'$GPU_TYPE'" "'$wall'" "'$job_name'" "'$CPU_FEATURE'" "'$MEMORY'" "'$NODE_LIST'" "'$MAIL_TO'" 2>"$SSH_ERR" << 'REMOTE'
+    out=$(rssh conv bash -s "'$num_gpus'" "'$GPU_TYPE'" "'$wall'" "'$job_name'" "'$CPU_FEATURE'" "'$MEMORY'" "'$NODE_LIST'" "'$MAIL_TO'" "'$QOS'" 2>"$SSH_ERR" << 'REMOTE'
 if [ ! -x ~/.venvs/conv_jupyter/bin/jupyter ]; then
     { source /etc/profile.d/modules.sh; module purge; module load python/anaconda3; python -m venv ~/.venvs/conv_jupyter \
         && ~/.venvs/conv_jupyter/bin/python -m pip install --quiet --upgrade pip jupyterlab; } > ~/.conv_jupyter_install.log 2>&1
@@ -629,6 +636,7 @@ CPU_FEATURE="$5"
 MEMORY="$6"
 NODE_LIST="$7"
 MAIL="$8"
+QOS="$9"
 CONSTRAINT_LINE=""
 MEMORY_LINE=""
 NODE_LINE=""
@@ -643,6 +651,7 @@ cat > ~/._conv_jupyter.sh << JOBSCRIPT
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=${GPU_TYPE}:${NUM_GPUS}
 #SBATCH --time=${WALL}
+#SBATCH --qos=${QOS}
 ${CONSTRAINT_LINE}
 ${MEMORY_LINE}
 ${NODE_LINE}
@@ -761,7 +770,7 @@ submit_custom() {
     echo ""
     echo -e "${CYAN}Submitting ${script_path}: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
 
-    SLURM_EXTRA=$(slurm_options "$cpu_feature" "$memory" "$node_list")
+    SLURM_EXTRA=$(slurm_options "$cpu_feature" "$memory" "$node_list" "$QOS")
     local mail_opts=""
     [ -n "$MAIL_TO" ] && mail_opts=" --mail-type=ALL --mail-user='${MAIL_TO}'"
     echo -e "${DIM}sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA} ${script_path}${NC}"
@@ -849,10 +858,10 @@ my_jobs() {
     while IFS='|' read -r jid name state elapsed limit left node; do
         [ -z "$jid" ] && continue
         if [ "$state" = "RUNNING" ]; then
-            running_lines+="$(printf "  %-8s %-20s %-12s %-12s %-12s %s\n" "$jid" "$name" "$elapsed" "$limit" "$left" "$node")"$'\n'
+            running_lines+="$(printf "  %-8s %-20.20s %-12s %-12s %-12s %.9s\n" "$jid" "$name" "$elapsed" "$limit" "$left" "$node")"$'\n'
             has_running=true
         else
-            pending_lines+="$(printf "  %-8s %-20s %-12s %s\n" "$jid" "$name" "$limit" "$node")"$'\n'
+            pending_lines+="$(printf "  %-8s %-20.20s %-12s %.34s\n" "$jid" "$name" "$limit" "$node")"$'\n'
             has_pending=true
         fi
     done <<< "$raw"
@@ -860,7 +869,7 @@ my_jobs() {
     if $has_running; then
         echo -e "${GREEN}${BOLD}RUNNING${NC}"
         printf "  %-8s %-20s %-12s %-12s %-12s %s\n" "JobID" "Name" "Elapsed" "TimeLimit" "TimeLeft" "Node"
-        echo -e "  ${DIM}────────────────────────────────────────────────────────────────────────────────${NC}"
+        echo -e "  ${DIM}──────────────────────────────────────────────────────────────────────────────${NC}"
         printf "%s" "$running_lines"
     fi
 
@@ -923,10 +932,10 @@ cancel_job() {
     echo -e "${BOLD}Your jobs:${NC}"
     echo ""
     printf "  %-8s %-20s %-10s %-12s %-12s %s\n" "JobID" "Name" "State" "Elapsed" "TimeLimit" "Node"
-    echo -e "  ${DIM}────────────────────────────────────────────────────────────────────────────────${NC}"
+    echo -e "  ${DIM}──────────────────────────────────────────────────────────────────────────────${NC}"
     while IFS='|' read -r jid name state elapsed limit node; do
         [ -z "$jid" ] && continue
-        printf "  %-8s %-20s %-10s %-12s %-12s %s\n" "$jid" "$name" "$state" "$elapsed" "$limit" "$node"
+        printf "  %-8s %-20.20s %-10s %-12s %-12s %.11s\n" "$jid" "$name" "$state" "$elapsed" "$limit" "$node"
     done <<< "$raw"
     echo ""
     echo -e "Enter a job ID to cancel, or ${BOLD}all${NC} to cancel everything."
@@ -996,10 +1005,10 @@ connect_existing() {
         echo -e "${BOLD}Your jobs:${NC}"
         echo ""
         printf "  %-8s %-20s %-10s %-12s %-12s %s\n" "JobID" "Name" "State" "Elapsed" "TimeLimit" "Node"
-        echo -e "  ${DIM}────────────────────────────────────────────────────────────────────────────────${NC}"
+        echo -e "  ${DIM}──────────────────────────────────────────────────────────────────────────────${NC}"
         while IFS='|' read -r jid name state elapsed limit left node; do
             [ -z "$jid" ] && continue
-            printf "  %-8s %-20s %-10s %-12s %-12s %s\n" "$jid" "$name" "$state" "$elapsed" "$limit" "$node"
+            printf "  %-8s %-20.20s %-10s %-12s %-12s %.11s\n" "$jid" "$name" "$state" "$elapsed" "$limit" "$node"
         done <<< "$raw"
         echo ""
         echo -e "Enter the job ID you want to connect to:"
