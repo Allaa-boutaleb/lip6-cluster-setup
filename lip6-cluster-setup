@@ -28,18 +28,40 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 status_line() { printf "\r\033[K%s" "$1"; }
 status_done() { printf "\r\033[K%s\n" "$1"; }
 
+# The comment written above the Include line this script adds to ~/.ssh/config; --reset removes both lines
+INCLUDE_TAG="# Added by lip6-cluster-setup (--reset removes this line and the next)"
+
+# filter_file FILE AWK_PROGRAM: rewrite FILE through awk in place; `cat >` keeps symlinks (dotfile managers) and modes
+filter_file() {
+    local tmp rc
+    tmp=$(mktemp "${TMPDIR:-/tmp}/lip6-setup.XXXXXX") || return 1
+    awk -v tag="$INCLUDE_TAG" "$2" "$1" > "$tmp" && cat "$tmp" > "$1"
+    rc=$?
+    rm -f "$tmp"
+    return $rc
+}
+
+# remove_remote_block HOST MARKER: drop the "# BEGIN/END MARKER" block from HOST's ~/.bashrc.
+# The previous file is kept as ~/.bashrc.lip6-bak; a BEGIN without END changes nothing.
 remove_remote_block() {
     local host="$1"
     local marker="$2"
-    ssh -o ConnectTimeout=10 "$host" bash -s "$marker" << 'REMOTE'
+    # ssh re-splits its argv on the remote side: the quotes keep the marker one argument
+    ssh -o ConnectTimeout=10 "$host" bash -s "'$marker'" << 'REMOTE'
 marker="$1"
-[ -f ~/.bashrc ] || exit 0
-tmp=$(mktemp ~/.bashrc.lip6.XXXXXX)
-awk -v begin="# BEGIN ${marker}" -v end="# END ${marker}" '
+grep -qxF "# BEGIN ${marker}" ~/.bashrc 2>/dev/null || exit 0
+tmp=$(mktemp ~/.bashrc.lip6.XXXXXX) && cp -p ~/.bashrc ~/.bashrc.lip6-bak && cp -p ~/.bashrc "$tmp" || exit 1
+if awk -v begin="# BEGIN ${marker}" -v end="# END ${marker}" '
     $0 == begin { skip=1; next }
     $0 == end { skip=0; next }
     !skip { print }
-' ~/.bashrc > "$tmp" && mv "$tmp" ~/.bashrc
+    END { if (skip) exit 3 }
+' ~/.bashrc > "$tmp" && mv "$tmp" ~/.bashrc; then
+    exit 0
+fi
+rm -f "$tmp"
+echo "~/.bashrc left unchanged: '# BEGIN ${marker}' has no matching '# END' line (or the write failed)." >&2
+exit 1
 REMOTE
 }
 
@@ -75,33 +97,44 @@ repair_login() {
     local host="${1:-conv}"
     echo ""
     echo -e "${CYAN}Repairing remote login on ${host}...${NC}"
-    ssh -o ConnectTimeout=10 "$host" bash << 'REMOTE'
-set -e
+    if ssh -o ConnectTimeout=10 "$host" bash << 'REMOTE'
 ts=$(date +%Y%m%d%H%M%S)
 mkdir -p ~/login-rescue
-[ -f ~/.ssh/rc ] && mv ~/.ssh/rc ~/login-rescue/ssh-rc.disabled.$ts
-rm -f ~/.codex-autojump-node07 ~/.codex-autojump-node07.disabled.* 2>/dev/null || true
-for marker in "LIP6 Convergence Cluster Aliases" "LIP6 HPC Aliases"; do
-    if [ -f ~/.bashrc ]; then
-        tmp=$(mktemp ~/.bashrc.lip6.XXXXXX)
-        awk -v begin="# BEGIN ${marker}" -v end="# END ${marker}" '
-            $0 == begin { skip=1; next }
-            $0 == end { skip=0; next }
-            !skip { print }
-        ' ~/.bashrc > "$tmp" && mv "$tmp" ~/.bashrc
-    fi
-done
-echo "Remote login repair complete. Backups, if any, are in ~/login-rescue."
+[ ! -f ~/.ssh/rc ] || mv ~/.ssh/rc ~/login-rescue/ssh-rc.disabled.$ts
+rm -f ~/.codex-autojump-node07 ~/.codex-autojump-node07.disabled.* 2>/dev/null
+exit 0
 REMOTE
-    echo -e "${GREEN}Repair command finished.${NC}"
+    then
+        echo -e "  ${GREEN}ok${NC} login hooks disabled on ${host} (backups, if any, in ~/login-rescue)"
+    else
+        echo -e "  ${RED}Could not reach ${host}.${NC} Check your network/VPN, then try again."
+        exit 1
+    fi
+    local marker
+    for marker in "LIP6 Convergence Cluster Aliases" "LIP6 HPC Aliases"; do
+        remove_remote_block "$host" "$marker" || echo -e "  ${YELLOW}--${NC} '${marker}' block NOT removed (see the message above)"
+    done
+    echo -e "${GREEN}Repair finished.${NC} ${DIM}A changed ~/.bashrc keeps its previous version in ~/.bashrc.lip6-bak.${NC}"
 }
 
+# uninstall_remote_blocks: remove the managed .bashrc blocks on both clusters, one line per host
 uninstall_remote_blocks() {
+    local host marker failed=0
     echo ""
     echo -e "${CYAN}Removing managed remote .bashrc blocks...${NC}"
-    remove_remote_block hpc "LIP6 HPC Aliases" 2>/dev/null || true
-    remove_remote_block conv "LIP6 Convergence Cluster Aliases" 2>/dev/null || true
-    echo -e "${GREEN}Remote blocks removed where reachable.${NC}"
+    for host in hpc conv; do
+        case $host in
+            hpc) marker="LIP6 HPC Aliases" ;;
+            *) marker="LIP6 Convergence Cluster Aliases" ;;
+        esac
+        if remove_remote_block "$host" "$marker"; then
+            echo -e "  ${GREEN}ok${NC} ${host}: no '${marker}' block left in ~/.bashrc"
+        else
+            echo -e "  ${YELLOW}--${NC} ${host}: block NOT removed (unreachable, or see the message above)"
+            failed=1
+        fi
+    done
+    return $failed
 }
 
 if [ "$1" = "doctor" ]; then
@@ -116,7 +149,7 @@ fi
 
 if [ "$1" = "uninstall" ] && [ "$2" = "--remote-blocks" ]; then
     uninstall_remote_blocks
-    exit 0
+    exit $?
 fi
 
 # ---- Reset mode ----
@@ -133,11 +166,11 @@ if [ "$1" = "--reset" ] || [ "$1" = "--uninstall" ]; then
     echo -e "      ${DIM}Removes ~/hpc-notebook, ~/conv-manager, SSH config, local aliases${NC}"
     echo ""
     echo -e "  ${GREEN}2${NC})  Full reset (local + remote)"
-    echo -e "      ${DIM}Also restores .bashrc on HPC and Convergence from backup${NC}"
+    echo -e "      ${DIM}Also removes the LIP6 alias blocks from .bashrc on HPC and Convergence${NC}"
     echo ""
     echo -e "  ${CYAN}0${NC})  Cancel"
     echo ""
-    read -p "> " reset_choice
+    read -r -p "> " reset_choice || reset_choice=0
 
     case $reset_choice in
         0) echo -e "\n${DIM}Cancelled.${NC}\n"; exit 0 ;;
@@ -145,69 +178,15 @@ if [ "$1" = "--reset" ] || [ "$1" = "--uninstall" ]; then
         *) echo -e "${RED}Invalid choice.${NC}"; exit 1 ;;
     esac
 
-    # Full reset: restore remote .bashrc FIRST (while SSH config still works)
-    if [ "$reset_choice" = "2" ]; then
+    # Full reset: clean the remote .bashrc FIRST (while the SSH config still works)
+    if [ "$reset_choice" = "2" ] && ! uninstall_remote_blocks; then
         echo ""
-        echo -e "${CYAN}Resetting remote .bashrc files...${NC}"
-        echo -e "${DIM}This requires SSH access (done before removing local SSH config).${NC}"
-        echo ""
-
-        hpc_ok=false
-        conv_ok=false
-
-        # Try HPC — single SSH call
-        status_line "  HPC:          ● Testing..."
-        hpc_result=$(ssh -o ConnectTimeout=10 hpc '
-            if [ -f ~/.bashrc.pre-lip6-setup ]; then
-                cp ~/.bashrc.pre-lip6-setup ~/.bashrc
-                echo "RESTORED"
-            else
-                echo "NO_BACKUP"
-            fi
-        ' 2>/dev/null) || hpc_result=""
-
-        if [ "$hpc_result" = "RESTORED" ]; then
-            status_done "  HPC:          $(echo -e "${GREEN}✓ Restored .bashrc from backup${NC}")"
-            hpc_ok=true
-        elif [ "$hpc_result" = "NO_BACKUP" ]; then
-            status_done "  HPC:          $(echo -e "${YELLOW}No backup found (.bashrc.pre-lip6-setup)${NC}")"
-            hpc_ok=true
-        else
-            status_done "  HPC:          $(echo -e "${DIM}✗ Skipped (not configured or unreachable)${NC}")"
-        fi
-
-        # Try Convergence — single SSH call
-        status_line "  Convergence:  ● Testing..."
-        conv_result=$(ssh -o ConnectTimeout=10 conv '
-            if [ -f ~/.bashrc.pre-lip6-setup ]; then
-                cp ~/.bashrc.pre-lip6-setup ~/.bashrc
-                echo "RESTORED"
-            else
-                echo "NO_BACKUP"
-            fi
-        ' 2>/dev/null) || conv_result=""
-
-        if [ "$conv_result" = "RESTORED" ]; then
-            status_done "  Convergence:  $(echo -e "${GREEN}✓ Restored .bashrc from backup${NC}")"
-            conv_ok=true
-        elif [ "$conv_result" = "NO_BACKUP" ]; then
-            status_done "  Convergence:  $(echo -e "${YELLOW}No backup found (.bashrc.pre-lip6-setup)${NC}")"
-            conv_ok=true
-        else
-            status_done "  Convergence:  $(echo -e "${DIM}✗ Skipped (not configured or unreachable)${NC}")"
-        fi
-
-        # If both unreachable, warn before destroying local config
-        if ! $hpc_ok && ! $conv_ok; then
-            echo ""
-            echo -e "${YELLOW}Both remote servers are unreachable.${NC}"
-            echo -e "${YELLOW}Continuing will destroy local SSH config without restoring remote .bashrc files.${NC}"
-            echo ""
-            read -p "Continue anyway? (y/N) " confirm
-            if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-                echo -e "\n${DIM}Cancelled.${NC}\n"
-                exit 0
-            fi
+        echo -e "${YELLOW}Some remote blocks were not removed.${NC} The local reset deletes the SSH config,"
+        echo -e "${YELLOW}so to remove them later you will have to run the setup again first.${NC}"
+        read -r -p "Continue with the local reset anyway? (y/N) " confirm || confirm=n
+        if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+            echo -e "\n${DIM}Cancelled.${NC}\n"
+            exit 0
         fi
     fi
 
@@ -225,27 +204,20 @@ if [ "$1" = "--reset" ] || [ "$1" = "--uninstall" ]; then
         fi
     done
 
-    # Remove LIP6 SSH config
+    # Remove LIP6 SSH config, then only the Include line this script added (later edits stay)
     if [ -f ~/.ssh/config.d/lip6 ]; then
         rm ~/.ssh/config.d/lip6
         echo -e "  ${GREEN}✓ Removed${NC} ~/.ssh/config.d/lip6"
     fi
-    # Restore main SSH config from backup (in case Include was added)
-    LATEST_BACKUP=$(ls -t ~/.ssh/config.backup.* 2>/dev/null | head -1)
-    if [ -n "$LATEST_BACKUP" ]; then
-        cp "$LATEST_BACKUP" ~/.ssh/config
-        echo -e "  ${GREEN}✓ Restored${NC} SSH config from backup (${LATEST_BACKUP})"
-    else
-        echo -e "  ${DIM}No SSH config backup to restore.${NC}"
+    if grep -qxF "$INCLUDE_TAG" ~/.ssh/config 2>/dev/null; then
+        filter_file ~/.ssh/config '$0 == tag { drop=1; next } drop && $0 == "Include config.d/*" { drop=0; next } { drop=0; print }' \
+            && echo -e "  ${GREEN}✓ Removed${NC} the Include line added to ~/.ssh/config"
     fi
 
     # Remove aliases from shell configs
     for rc in ~/.bashrc ~/.zshrc ~/.config/fish/config.fish; do
-        if [ -f "$rc" ] && grep -q 'alias hpc=\|alias conv=' "$rc" 2>/dev/null; then
-            tmpfile=$(mktemp "${rc}.XXXXXX")
-            grep -v 'alias hpc=' "$rc" | grep -v 'alias conv=' > "$tmpfile" 2>/dev/null || true
-            mv "$tmpfile" "$rc"
-            echo -e "  ${GREEN}✓ Cleaned${NC} aliases from $rc"
+        if [ -f "$rc" ] && grep -Eq 'alias (hpc|conv)=' "$rc" 2>/dev/null; then
+            filter_file "$rc" '!/alias (hpc|conv)=/' && echo -e "  ${GREEN}✓ Cleaned${NC} aliases from $rc"
         fi
     done
 
@@ -256,6 +228,9 @@ if [ "$1" = "--reset" ] || [ "$1" = "--uninstall" ]; then
 fi
 
 # ---- Helper: validated input ----
+
+# input_ended: Ctrl-D or closed stdin inside a question; stop instead of re-asking forever
+input_ended() { echo -e "\n  ${RED}Input ended.${NC}" >&2; exit 1; }
 
 # ask PROMPT DEFAULT REGEX ERROR_MSG
 # Loops until input matches REGEX. Prints result to stdout.
@@ -270,11 +245,11 @@ ask() {
     while true; do
         if [ -n "$default" ]; then
             echo -ne "${BOLD}${prompt}${NC} [${DIM}${default}${NC}]: " >&2
-            read result
+            read -r result || input_ended
             result="${result:-$default}"
         else
             echo -ne "${BOLD}${prompt}${NC}: " >&2
-            read result
+            read -r result || input_ended
         fi
 
         if [ -z "$result" ]; then
@@ -301,11 +276,11 @@ ask_choice() {
     while true; do
         if [ -n "$default" ]; then
             echo -ne "${DIM}${prompt} [${default}]:${NC} " >&2
-            read result
+            read -r result || input_ended
             result="${result:-$default}"
         else
             echo -ne "${DIM}${prompt}:${NC} " >&2
-            read result
+            read -r result || input_ended
         fi
 
         if echo "$result" | grep -qE "^[1-${max}]$"; then
@@ -328,6 +303,9 @@ for f in hpc-notebook conv-manager; do
     fi
 done
 
+# Anything that stops the wizard early (a failed command, Ctrl-D) says so; it is safe to run again.
+trap '[ $? -eq 0 ] || echo -e "\n${RED}Setup did not finish.${NC} Fix the problem above, then run $0 again (re-running is safe)." >&2' EXIT
+
 # ---- Welcome ----
 
 echo ""
@@ -348,7 +326,7 @@ echo -e "  - Your LIP6 username"
 echo -e "  - Your LIP6 secure password (wifi/workstation, NOT email)"
 echo -e "  - To know which clusters you have access to"
 echo ""
-read -p "Press Enter to continue..."
+read -r -p "Press Enter to continue..."
 
 # ---- Gather info ----
 
@@ -378,10 +356,14 @@ echo ""
 echo -e "  ${GREEN}2${NC})  ALSOC, CIAN, QI, SYEL"
 echo -e "      ${DIM}(Gateway: barder.lip6.fr)${NC}"
 echo ""
-team_choice=$(ask_choice "Select your team group (1 or 2)" 2 1)
+echo -e "  ${GREEN}3${NC})  ALSOC, CIAN, QI, SYEL — other gateway"
+echo -e "      ${DIM}(Gateway: ducas.lip6.fr, if barder does not work for you)${NC}"
+echo ""
+team_choice=$(ask_choice "Select your team group (1, 2, or 3)" 3 1)
 
 case $team_choice in
     2) GATEWAY="barder.lip6.fr" ;;
+    3) GATEWAY="ducas.lip6.fr" ;;
     *) GATEWAY="ssh.lip6.fr" ;;
 esac
 
@@ -439,7 +421,13 @@ echo ""
 echo -e "${BLUE}────────────────────────────────────────────────${NC}"
 echo ""
 echo -e "${DIM}Press Enter to continue, or Ctrl+C to abort.${NC}"
-read
+read -r _
+
+# Every step that fails adds one line here; the final summary prints them instead of "Setup complete!"
+PROBLEMS=()
+problem() { PROBLEMS+=("$1"); }
+HPC_OK=false
+CONV_OK=false
 
 # ---- SSH Key ----
 
@@ -448,19 +436,23 @@ echo -e "${BOLD}Step 2: SSH key${NC}"
 echo ""
 
 SSH_KEY="$HOME/.ssh/id_ed25519"
+mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
 if [ -f "$SSH_KEY" ]; then
     status_done "  $(echo -e "${GREEN}✓${NC} SSH key exists: $SSH_KEY")"
+    if [ ! -f "${SSH_KEY}.pub" ]; then
+        ssh-keygen -y -f "$SSH_KEY" > "${SSH_KEY}.pub" \
+            || { echo -e "${RED}Cannot rebuild ${SSH_KEY}.pub from your key.${NC} Restore the .pub file, then re-run."; exit 1; }
+        echo -e "  ${GREEN}✓${NC} Rebuilt the missing ${SSH_KEY}.pub"
+    fi
 else
-    status_line "  ● Generating SSH key..."
-    mkdir -p ~/.ssh
-    ssh-keygen -t ed25519 -C "$EMAIL" -f "$SSH_KEY" -N ""
+    ssh-keygen -q -t ed25519 -C "$EMAIL" -f "$SSH_KEY" -N ""
     status_done "  $(echo -e "${GREEN}✓${NC} SSH key generated: $SSH_KEY")"
     echo ""
     echo -e "${YELLOW}Note:${NC} The key was created without a passphrase for convenience."
-    echo -e "${DIM}To add a passphrase later: ssh-keygen -p -f $SSH_KEY${NC}"
+    echo -e "${DIM}To add a passphrase later: ssh-keygen -p -f \"$SSH_KEY\"${NC}"
 fi
 
-chmod 700 ~/.ssh
 chmod 600 "$SSH_KEY"
 chmod 644 "${SSH_KEY}.pub"
 
@@ -473,27 +465,17 @@ echo ""
 SSH_CONFIG="$HOME/.ssh/config"
 SSH_LIP6_CONFIG="$HOME/.ssh/config.d/lip6"
 
-# Backup existing config
-if [ -f "$SSH_CONFIG" ]; then
-    cp "$SSH_CONFIG" "${SSH_CONFIG}.backup.$(date +%s)"
-fi
-
-# Use Include-based approach to preserve existing SSH config entries
+# Include config.d/* at the top of ~/.ssh/config, unless a top-level Include already does it.
+# The first edit keeps the original as ~/.ssh/config.pre-lip6 (never overwritten); --reset removes only our two lines.
 mkdir -p "$HOME/.ssh/config.d"
-if [ ! -f "$SSH_CONFIG" ] || ! grep -q 'Include config.d/\*' "$SSH_CONFIG" 2>/dev/null; then
-    # Prepend Include directive (must be at top of config)
-    if [ -f "$SSH_CONFIG" ]; then
-        tmpfile=$(mktemp "${SSH_CONFIG}.XXXXXX")
-        echo "Include config.d/*" > "$tmpfile"
-        echo "" >> "$tmpfile"
-        cat "$SSH_CONFIG" >> "$tmpfile"
-        mv "$tmpfile" "$SSH_CONFIG"
-    else
-        echo "Include config.d/*" > "$SSH_CONFIG"
-    fi
+touch "$SSH_CONFIG"
+if ! grep -Eq '^[[:space:]]*Include[[:space:]]+(~/\.ssh/)?config\.d/\*[[:space:]]*$' "$SSH_CONFIG"; then
+    [ -e "${SSH_CONFIG}.pre-lip6" ] || [ ! -s "$SSH_CONFIG" ] || cp -p "$SSH_CONFIG" "${SSH_CONFIG}.pre-lip6"
+    filter_file "$SSH_CONFIG" 'NR == 1 { print tag; print "Include config.d/*"; print "" } { print } END { if (NR == 0) { print tag; print "Include config.d/*" } }'
 fi
 
-# Build LIP6-specific config in config.d/
+# Build LIP6-specific config in config.d/. Every cluster's Host block is always written, so re-running the
+# setup for one cluster keeps the other one working.
 {
     echo "# ==================================================================="
     echo "# LIP6 Cluster SSH Config"
@@ -503,53 +485,47 @@ fi
     echo "Host lip6"
     echo "    HostName $GATEWAY"
     echo "    User $USERNAME"
-    echo "    IdentityFile $SSH_KEY"
+    echo "    IdentityFile \"$SSH_KEY\""
     echo "    IdentitiesOnly yes"
     echo "    StrictHostKeyChecking accept-new"
     echo ""
-
-    if $SETUP_HPC; then
-        echo "Host hpc"
-        echo "    HostName cluster.lip6.fr"
-        echo "    User $USERNAME"
-        echo "    ProxyJump lip6"
-        echo "    IdentityFile $SSH_KEY"
-        echo "    IdentitiesOnly yes"
-        echo "    ServerAliveInterval 60"
-        echo "    ServerAliveCountMax 3"
-        echo "    StrictHostKeyChecking accept-new"
-        echo ""
-    fi
-
-    if $SETUP_CONV; then
-        echo "Host conv"
-        echo "    HostName front.convergence.lip6.fr"
-        echo "    User $USERNAME"
-        echo "    IdentityFile $SSH_KEY"
-        echo "    IdentitiesOnly yes"
-        echo "    ServerAliveInterval 60"
-        echo "    ServerAliveCountMax 3"
-        echo "    StrictHostKeyChecking accept-new"
-        echo ""
-        echo "Host front.convergence.lip6.fr"
-        echo "    User $USERNAME"
-        echo "    ProxyJump none"
-        echo "    IdentityFile $SSH_KEY"
-        echo "    IdentitiesOnly yes"
-        echo "    ServerAliveInterval 60"
-        echo "    ServerAliveCountMax 3"
-        echo "    StrictHostKeyChecking accept-new"
-        echo ""
-        echo "Host *.convergence.lip6.fr"
-        echo "    User $USERNAME"
-        echo "    ProxyJump conv"
-        echo "    IdentityFile $SSH_KEY"
-        echo "    IdentitiesOnly yes"
-        echo "    ServerAliveInterval 60"
-        echo "    ServerAliveCountMax 3"
-        echo "    StrictHostKeyChecking accept-new"
-        echo ""
-    fi
+    echo "Host hpc"
+    echo "    HostName cluster.lip6.fr"
+    echo "    User $USERNAME"
+    echo "    ProxyJump lip6"
+    echo "    IdentityFile \"$SSH_KEY\""
+    echo "    IdentitiesOnly yes"
+    echo "    ServerAliveInterval 60"
+    echo "    ServerAliveCountMax 3"
+    echo "    StrictHostKeyChecking accept-new"
+    echo ""
+    echo "Host conv"
+    echo "    HostName front.convergence.lip6.fr"
+    echo "    User $USERNAME"
+    echo "    IdentityFile \"$SSH_KEY\""
+    echo "    IdentitiesOnly yes"
+    echo "    ServerAliveInterval 60"
+    echo "    ServerAliveCountMax 3"
+    echo "    StrictHostKeyChecking accept-new"
+    echo ""
+    echo "Host front.convergence.lip6.fr"
+    echo "    User $USERNAME"
+    echo "    ProxyJump none"
+    echo "    IdentityFile \"$SSH_KEY\""
+    echo "    IdentitiesOnly yes"
+    echo "    ServerAliveInterval 60"
+    echo "    ServerAliveCountMax 3"
+    echo "    StrictHostKeyChecking accept-new"
+    echo ""
+    echo "Host *.convergence.lip6.fr"
+    echo "    User $USERNAME"
+    echo "    ProxyJump conv"
+    echo "    IdentityFile \"$SSH_KEY\""
+    echo "    IdentitiesOnly yes"
+    echo "    ServerAliveInterval 60"
+    echo "    ServerAliveCountMax 3"
+    echo "    StrictHostKeyChecking accept-new"
+    echo ""
 } > "$SSH_LIP6_CONFIG"
 
 chmod 600 "$SSH_CONFIG"
@@ -561,42 +537,46 @@ status_done "  $(echo -e "${GREEN}✓${NC} SSH config written to ${SSH_LIP6_CONF
 echo ""
 echo -e "${BOLD}Step 4: Copying SSH key to servers${NC}"
 echo ""
-echo -e "${YELLOW}You will be asked for your LIP6 password a few times.${NC}"
+echo -e "${YELLOW}You may be asked for your LIP6 password a few times.${NC}"
 echo -e "${DIM}This is the LAST time you'll ever need to type it.${NC}"
 echo ""
-read -p "Press Enter to continue..."
+read -r -p "Press Enter to continue..."
+
+# copy_key HOST: append our public key to HOST's authorized_keys once (ssh-copy-id is missing on some Git Bash
+# installs). A key that already works is not asked for again; the password prompt comes from the terminal.
+ADD_KEY='umask 077; mkdir -p ~/.ssh; k=$(cat); touch ~/.ssh/authorized_keys; grep -qxF "$k" ~/.ssh/authorized_keys || printf "%s\n" "$k" >> ~/.ssh/authorized_keys'
+copy_key() {
+    ssh -o BatchMode=yes -o ConnectTimeout=10 "$1" "$ADD_KEY" < "${SSH_KEY}.pub" 2>/dev/null \
+        || ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "$1" "$ADD_KEY" < "${SSH_KEY}.pub"
+}
 
 echo ""
 echo -e "${CYAN}Copying key to gateway (${GATEWAY})...${NC}"
-ssh-copy-id -i "${SSH_KEY}.pub" "${USERNAME}@${GATEWAY}" || {
-    echo -e "${RED}Failed to copy key to gateway. Check your password.${NC}"
-    exit 1
-}
+if copy_key lip6; then
+    echo -e "  ${GREEN}✓${NC} key installed on ${GATEWAY}"
+else
+    echo -e "  ${RED}✗ Could not copy the key to ${GATEWAY}${NC}: wrong password, wrong team group, or gateway unreachable."
+    problem "Key not copied to the gateway ${GATEWAY} (re-run and check the password / team group)."
+fi
 
 if $SETUP_HPC; then
     echo ""
     echo -e "${CYAN}Copying key to HPC cluster...${NC}"
-    ssh-copy-id -o "ProxyJump=${USERNAME}@${GATEWAY}" -i "${SSH_KEY}.pub" "${USERNAME}@cluster.lip6.fr" || {
-        echo -e "${RED}Failed to copy key to HPC. You may not have HPC access.${NC}"
-    }
+    if copy_key hpc; then
+        echo -e "  ${GREEN}✓${NC} key installed on HPC"
+    else
+        echo -e "  ${RED}✗ Could not copy the key to HPC${NC} (no HPC account, wrong password, or unreachable)."
+    fi
 fi
 
 if $SETUP_CONV; then
     echo ""
     echo -e "${CYAN}Copying key to Convergence...${NC}"
-    ssh-copy-id -o "ProxyJump=${USERNAME}@${GATEWAY}" -i "${SSH_KEY}.pub" "${USERNAME}@front.convergence.lip6.fr" || {
-        echo -e "${RED}Failed to copy key to Convergence. You may not have access.${NC}"
-    }
-
-    echo ""
-    echo -e "${CYAN}Setting up node-to-node SSH on Convergence...${NC}"
-    ssh conv "
-        if [ ! -f ~/.ssh/id_ed25519 ]; then
-            ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519 -q
-        fi
-        grep -qF \"\$(cat ~/.ssh/id_ed25519.pub)\" ~/.ssh/authorized_keys 2>/dev/null || cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
-        chmod 600 ~/.ssh/authorized_keys
-    " 2>/dev/null && echo -e "${GREEN}Node-to-node SSH configured.${NC}" || echo -e "${YELLOW}Could not auto-configure node SSH. You can do this manually later.${NC}"
+    if copy_key conv; then
+        echo -e "  ${GREEN}✓${NC} key installed on Convergence"
+    else
+        echo -e "  ${RED}✗ Could not copy the key to Convergence${NC} (no account, wrong password, or unreachable)."
+    fi
 fi
 
 # ---- Test connections ----
@@ -605,21 +585,43 @@ echo ""
 echo -e "${BOLD}Step 5: Testing connections${NC}"
 echo ""
 
+# A cluster that fails here is skipped below (its remote aliases) and listed in the final summary.
 if $SETUP_HPC; then
     status_line "  HPC:          ● Testing..."
-    if ssh -o ConnectTimeout=10 hpc "echo ok" 2>/dev/null | grep -q ok; then
+    if ssh -o BatchMode=yes -o ConnectTimeout=10 hpc "echo ok" 2>/dev/null | grep -q ok; then
         status_done "  HPC:          $(echo -e "${GREEN}✓ Connected${NC}")"
+        HPC_OK=true
     else
-        status_done "  HPC:          $(echo -e "${RED}✗ Failed${NC}")"
+        status_done "  HPC:          $(echo -e "${RED}✗ Failed${NC}") ${DIM}(see why with: ssh -v hpc)${NC}"
+        problem "HPC: passwordless login failed, so its remote aliases were not set up (see why with: ssh -v hpc)."
     fi
 fi
 
 if $SETUP_CONV; then
     status_line "  Convergence:  ● Testing..."
-    if ssh -o ConnectTimeout=10 conv "echo ok" 2>/dev/null | grep -q ok; then
+    if ssh -o BatchMode=yes -o ConnectTimeout=10 conv "echo ok" 2>/dev/null | grep -q ok; then
         status_done "  Convergence:  $(echo -e "${GREEN}✓ Connected${NC}")"
+        CONV_OK=true
     else
-        status_done "  Convergence:  $(echo -e "${RED}✗ Failed${NC}")"
+        status_done "  Convergence:  $(echo -e "${RED}✗ Failed${NC}") ${DIM}(see why with: ssh -v conv)${NC}"
+        problem "Convergence: passwordless login failed, so its remote setup was skipped (see why with: ssh -v conv)."
+    fi
+fi
+
+if $CONV_OK; then
+    echo ""
+    echo -e "${CYAN}Setting up node-to-node SSH on Convergence...${NC}"
+    if ssh -o BatchMode=yes -o ConnectTimeout=10 conv "
+        if [ ! -f ~/.ssh/id_ed25519 ]; then
+            ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519 -q
+        fi
+        grep -qF \"\$(cat ~/.ssh/id_ed25519.pub)\" ~/.ssh/authorized_keys 2>/dev/null || cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+        chmod 600 ~/.ssh/authorized_keys
+    " 2>/dev/null; then
+        echo -e "${GREEN}Node-to-node SSH configured.${NC}"
+    else
+        echo -e "${YELLOW}Could not auto-configure node SSH.${NC}"
+        problem "Convergence node-to-node SSH not configured (terminal access to compute nodes may ask for a password)."
     fi
 fi
 
@@ -660,50 +662,36 @@ echo ""
 echo -e "${BOLD}Step 7: Setting up shell aliases${NC}"
 echo ""
 
+# setup_alias FILE NAME CMD: replace any old "alias NAME=" line in FILE (bash, zsh and fish all accept this form)
 setup_alias() {
     local file="$1"
     local name="$2"
     local cmd="$3"
 
-    if [ -f "$file" ]; then
-        # Remove old alias if exists (use mktemp for safe temp files)
-        local tmpfile
-        tmpfile=$(mktemp "${file}.XXXXXX")
-        grep -v "alias ${name}=" "$file" > "$tmpfile" 2>/dev/null || true
-        mv "$tmpfile" "$file"
-    fi
+    [ ! -f "$file" ] || filter_file "$file" "!/alias ${name}=/"
     echo "alias ${name}=\"${cmd}\"" >> "$file"
 }
 
 # Detect shell
-SHELL_NAME=$(basename "$SHELL" 2>/dev/null || echo "bash")
-
-if [ "$SHELL_NAME" = "fish" ]; then
-    SHELL_CONFIG="$HOME/.config/fish/config.fish"
-    mkdir -p "$(dirname "$SHELL_CONFIG")"
-    if $SETUP_HPC; then
-        tmpfile=$(mktemp "${SHELL_CONFIG}.XXXXXX")
-        grep -v 'alias hpc=' "$SHELL_CONFIG" > "$tmpfile" 2>/dev/null || true
-        mv "$tmpfile" "$SHELL_CONFIG" 2>/dev/null || true
-        echo 'alias hpc="~/hpc-notebook"' >> "$SHELL_CONFIG"
-    fi
-    if $SETUP_CONV; then
-        tmpfile=$(mktemp "${SHELL_CONFIG}.XXXXXX")
-        grep -v 'alias conv=' "$SHELL_CONFIG" > "$tmpfile" 2>/dev/null || true
-        mv "$tmpfile" "$SHELL_CONFIG" 2>/dev/null || true
-        echo 'alias conv="~/conv-manager"' >> "$SHELL_CONFIG"
-    fi
-elif [ "$SHELL_NAME" = "zsh" ]; then
-    SHELL_CONFIG="$HOME/.zshrc"
-    $SETUP_HPC && setup_alias "$SHELL_CONFIG" "hpc" "~/hpc-notebook"
-    $SETUP_CONV && setup_alias "$SHELL_CONFIG" "conv" "~/conv-manager"
-else
-    SHELL_CONFIG="$HOME/.bashrc"
-    $SETUP_HPC && setup_alias "$SHELL_CONFIG" "hpc" "~/hpc-notebook"
-    $SETUP_CONV && setup_alias "$SHELL_CONFIG" "conv" "~/conv-manager"
-fi
-
+SHELL_NAME=$(basename "${SHELL:-bash}")
+case "$SHELL_NAME" in
+    fish) SHELL_CONFIG="$HOME/.config/fish/config.fish"; mkdir -p "$HOME/.config/fish" ;;
+    zsh) SHELL_CONFIG="$HOME/.zshrc" ;;
+    *) SHELL_CONFIG="$HOME/.bashrc" ;;
+esac
+if $SETUP_HPC; then setup_alias "$SHELL_CONFIG" "hpc" "~/hpc-notebook"; fi
+if $SETUP_CONV; then setup_alias "$SHELL_CONFIG" "conv" "~/conv-manager"; fi
 echo -e "${GREEN}Aliases added to ${SHELL_CONFIG}${NC}"
+
+# Login shells (macOS Terminal, Git Bash) read ~/.bash_profile or ~/.profile, not ~/.bashrc: make them load it
+if [ "$SHELL_CONFIG" = "$HOME/.bashrc" ]; then
+    PROFILE="$HOME/.bash_profile"
+    [ -f "$PROFILE" ] || [ ! -f "$HOME/.profile" ] || PROFILE="$HOME/.profile"
+    if ! grep -q 'bashrc' "$PROFILE" 2>/dev/null; then
+        echo '[ -n "$BASH_VERSION" ] && [ -f ~/.bashrc ] && . ~/.bashrc' >> "$PROFILE"
+        echo -e "${GREEN}${PROFILE} now loads ~/.bashrc${NC} ${DIM}(so login shells see the aliases)${NC}"
+    fi
+fi
 
 # ---- Remote bashrc setup ----
 
@@ -711,48 +699,35 @@ echo ""
 echo -e "${BOLD}Step 8: Setting up remote cluster aliases${NC}"
 echo ""
 
-if $SETUP_HPC; then
+if $HPC_OK; then
     echo -e "${CYAN}Configuring HPC (.bashrc)...${NC}"
-    ssh hpc bash -s "$USERNAME" "$EMAIL" "$HPC_STORAGE" << 'REMOTE_HPC'
+    # single-quoted positionals: ssh re-splits its argv on the remote side
+    if ssh -o ConnectTimeout=10 hpc bash -s "'$USERNAME'" "'$HPC_STORAGE'" << 'REMOTE_HPC'
 USERNAME="$1"
-EMAIL="$2"
-HPC_STORAGE="$3"
+HPC_STORAGE="$2"
 
+# install_remote_block MARKER < TEXT: put TEXT between "# BEGIN/END MARKER" lines in ~/.bashrc, replacing the old
+# block. The previous file is kept as ~/.bashrc.lip6-bak; a BEGIN without END or a failed write changes nothing.
 install_remote_block() {
     marker="$1"
     content=$(cat)
-    ts=$(date +%Y%m%d%H%M%S)
     [ -f ~/.bashrc ] || touch ~/.bashrc
-    cp ~/.bashrc ~/.bashrc.pre-lip6-setup.$ts
-    tmp=$(mktemp ~/.bashrc.lip6.XXXXXX)
-    awk -v begin="# BEGIN ${marker}" -v end="# END ${marker}" '
+    tmp=$(mktemp ~/.bashrc.lip6.XXXXXX) && cp -p ~/.bashrc ~/.bashrc.lip6-bak && cp -p ~/.bashrc "$tmp" || return 1
+    if awk -v begin="# BEGIN ${marker}" -v end="# END ${marker}" '
         $0 == begin { skip=1; next }
         $0 == end { skip=0; next }
         !skip { print }
-    ' ~/.bashrc > "$tmp"
-    {
-        printf "%s\n" "# BEGIN ${marker}"
-        printf "%s\n" "$content"
-        printf "%s\n" "# END ${marker}"
-    } >> "$tmp"
-    mv "$tmp" ~/.bashrc
+        END { if (skip) exit 3 }
+    ' ~/.bashrc > "$tmp" && printf '%s\n%s\n%s\n' "# BEGIN ${marker}" "$content" "# END ${marker}" >> "$tmp" \
+        && mv "$tmp" ~/.bashrc; then
+        return 0
+    fi
+    rm -f "$tmp"
+    echo "~/.bashrc left unchanged: '# BEGIN ${marker}' has no matching '# END' line (or the write failed)." >&2
+    return 1
 }
 
-remove_remote_block() {
-    marker="$1"
-    [ -f ~/.bashrc ] || return 0
-    tmp=$(mktemp ~/.bashrc.lip6.XXXXXX)
-    awk -v begin="# BEGIN ${marker}" -v end="# END ${marker}" '
-        $0 == begin { skip=1; next }
-        $0 == end { skip=0; next }
-        !skip { print }
-    ' ~/.bashrc > "$tmp" && mv "$tmp" ~/.bashrc
-}
-
-verify_remote_login() { echo ok >/dev/null; }
-
-# BEGIN LIP6 HPC Aliases is generated by install_remote_block.
-install_remote_block "LIP6 HPC Aliases" << ALIASES
+install_remote_block "LIP6 HPC Aliases" << ALIASES || exit 1
 
 # === LIP6 HPC Aliases ===
 
@@ -760,7 +735,7 @@ hpc-conda() {
     source /etc/profile.d/modules.sh
     module purge
     module load python/anaconda3
-    eval "\\\$(conda shell.bash hook)"
+    eval "\$(conda shell.bash hook)"
 }
 
 hpc-small()  { oarsub -l /nodes=1/core=4,walltime=\${1:-8:0:0} -p "host like 'big%'" -I; }
@@ -807,52 +782,42 @@ hpc-help() {
     echo "  ${HPC_STORAGE}   team storage"
 }
 ALIASES
-echo "HPC aliases configured."
 REMOTE_HPC
-    echo -e "${GREEN}HPC aliases configured.${NC}"
+    then
+        echo -e "${GREEN}HPC aliases configured.${NC}"
+    else
+        problem "HPC: the aliases block was not added to ~/.bashrc (see the message above)."
+    fi
 fi
 
-if $SETUP_CONV; then
+if $CONV_OK; then
     echo -e "${CYAN}Configuring Convergence (.bashrc)...${NC}"
-    ssh conv bash -s "$USERNAME" "$EMAIL" << 'REMOTE_CONV'
+    echo -e "${DIM}This also turns off conda's auto-activation of 'base' there, if conda is set up (undo: conda config --set auto_activate_base true).${NC}"
+    if ssh -o ConnectTimeout=10 conv bash -s "'$USERNAME'" << 'REMOTE_CONV'
 USERNAME="$1"
-EMAIL="$2"
 
+# install_remote_block MARKER < TEXT: put TEXT between "# BEGIN/END MARKER" lines in ~/.bashrc, replacing the old
+# block. The previous file is kept as ~/.bashrc.lip6-bak; a BEGIN without END or a failed write changes nothing.
 install_remote_block() {
     marker="$1"
     content=$(cat)
-    ts=$(date +%Y%m%d%H%M%S)
     [ -f ~/.bashrc ] || touch ~/.bashrc
-    cp ~/.bashrc ~/.bashrc.pre-lip6-setup.$ts
-    tmp=$(mktemp ~/.bashrc.lip6.XXXXXX)
-    awk -v begin="# BEGIN ${marker}" -v end="# END ${marker}" '
+    tmp=$(mktemp ~/.bashrc.lip6.XXXXXX) && cp -p ~/.bashrc ~/.bashrc.lip6-bak && cp -p ~/.bashrc "$tmp" || return 1
+    if awk -v begin="# BEGIN ${marker}" -v end="# END ${marker}" '
         $0 == begin { skip=1; next }
         $0 == end { skip=0; next }
         !skip { print }
-    ' ~/.bashrc > "$tmp"
-    {
-        printf "%s\n" "# BEGIN ${marker}"
-        printf "%s\n" "$content"
-        printf "%s\n" "# END ${marker}"
-    } >> "$tmp"
-    mv "$tmp" ~/.bashrc
+        END { if (skip) exit 3 }
+    ' ~/.bashrc > "$tmp" && printf '%s\n%s\n%s\n' "# BEGIN ${marker}" "$content" "# END ${marker}" >> "$tmp" \
+        && mv "$tmp" ~/.bashrc; then
+        return 0
+    fi
+    rm -f "$tmp"
+    echo "~/.bashrc left unchanged: '# BEGIN ${marker}' has no matching '# END' line (or the write failed)." >&2
+    return 1
 }
 
-remove_remote_block() {
-    marker="$1"
-    [ -f ~/.bashrc ] || return 0
-    tmp=$(mktemp ~/.bashrc.lip6.XXXXXX)
-    awk -v begin="# BEGIN ${marker}" -v end="# END ${marker}" '
-        $0 == begin { skip=1; next }
-        $0 == end { skip=0; next }
-        !skip { print }
-    ' ~/.bashrc > "$tmp" && mv "$tmp" ~/.bashrc
-}
-
-verify_remote_login() { echo ok >/dev/null; }
-
-# BEGIN LIP6 Convergence Cluster Aliases is generated by install_remote_block.
-install_remote_block "LIP6 Convergence Cluster Aliases" << ALIASES
+install_remote_block "LIP6 Convergence Cluster Aliases" << ALIASES || exit 1
 
 # === LIP6 Convergence Cluster Aliases ===
 
@@ -860,7 +825,7 @@ conv-conda() {
     source /etc/profile.d/modules.sh 2>/dev/null
     module purge
     module load python/anaconda3
-    eval "\\\$(conda shell.bash hook)"
+    eval "\$(conda shell.bash hook)"
 }
 
 alias conv-jobs='squeue -u ${USERNAME}'
@@ -905,17 +870,35 @@ conv-help() {
     echo "  Per GPU default: 8 threads + 64GB RAM"
 }
 ALIASES
-echo "Convergence aliases configured."
 
-# Disable conda auto-activate
-conda config --set auto_activate_base false 2>/dev/null || true
+# Disable conda auto-activate (announced by the installer)
+conda config --set auto_activate_base false 2>/dev/null
+exit 0
 REMOTE_CONV
-    echo -e "${GREEN}Convergence aliases configured.${NC}"
+    then
+        echo -e "${GREEN}Convergence aliases configured.${NC}"
+    else
+        problem "Convergence: the aliases block was not added to ~/.bashrc (see the message above)."
+    fi
 fi
 
 # ---- Done ----
 
+trap - EXIT
 echo ""
+if [ ${#PROBLEMS[@]} -gt 0 ]; then
+    echo -e "${YELLOW}================================================================${NC}"
+    echo -e "${YELLOW}  Setup finished with problems:${NC}"
+    echo -e "${YELLOW}================================================================${NC}"
+    for p in "${PROBLEMS[@]}"; do
+        echo -e "  ${RED}-${NC} $p"
+    done
+    echo ""
+    echo -e "Fix these, then run ${BOLD}$0${NC} again (re-running is safe),"
+    echo -e "or check the remote side with ${BOLD}$0 doctor --remote${NC}."
+    echo ""
+    exit 1
+fi
 echo -e "${GREEN}================================================================${NC}"
 echo -e "${GREEN}  Setup complete!${NC}"
 echo -e "${GREEN}================================================================${NC}"

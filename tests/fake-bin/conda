@@ -1,0 +1,3 @@
+#!/bin/sh
+# Test stub: the installer's cluster-side setup calls conda; never touch a real conda install.
+echo "conda $*" >> "${FAKE_LOG:-/dev/null}"

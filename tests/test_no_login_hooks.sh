@@ -11,14 +11,12 @@ fail() {
 remote_setup=$(awk '
     /^# ---- Remote bashrc setup ----/ { found=1 }
     found { print }
-    found && /^# ---- Final instructions ----/ { exit }
+    found && /^# ---- Done ----/ { exit }
 ' lip6-cluster-setup)
 
-printf '%s\n' "$remote_setup" | grep -q 'install_remote_block' || fail "missing install_remote_block helper"
-printf '%s\n' "$remote_setup" | grep -q 'remove_remote_block' || fail "missing remove_remote_block helper"
-printf '%s\n' "$remote_setup" | grep -q 'verify_remote_login' || fail "missing verify_remote_login helper"
-printf '%s\n' "$remote_setup" | grep -q 'BEGIN LIP6 Convergence Cluster Aliases' || fail "missing managed Convergence block marker"
-printf '%s\n' "$remote_setup" | grep -q 'BEGIN LIP6 HPC Aliases' || fail "missing managed HPC block marker"
+printf '%s\n' "$remote_setup" | grep -q '^install_remote_block "LIP6 Convergence Cluster Aliases"' || fail "missing managed Convergence block"
+printf '%s\n' "$remote_setup" | grep -q '^install_remote_block "LIP6 HPC Aliases"' || fail "missing managed HPC block"
+grep -q '^remove_remote_block()' lip6-cluster-setup || fail "missing remove_remote_block helper"
 
 if printf '%s\n' "$remote_setup" | grep -Eq 'codex-node07|autojump|exec[[:space:]]+ssh'; then
     fail "remote setup contains a persistent auto-ssh login hook"
