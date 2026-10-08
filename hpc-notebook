@@ -167,7 +167,7 @@ ssh_failed() {
 
 # ssh_session ARGS: interactive ssh; its status is the remote shell's, only 255 means ssh itself failed
 ssh_session() {
-    ssh "$@"
+    rssh "$@"
     [ $? -ne 255 ] || echo -e "\n${RED}Could not connect.${NC} ${DIM}Check your network/VPN, then try again (test the link: ssh hpc true).${NC}"
 }
 
@@ -329,7 +329,7 @@ EOF
 
 collect_status() {
     local output jobs tunnels
-    output=$(ssh -n -o BatchMode=yes -o ConnectTimeout=3 hpc "printf 'login|reachable\n'; oarstat -u \"\$USER\" 2>/dev/null" 2>/dev/null || true)
+    output=$(rssh -n -o BatchMode=yes -o ConnectTimeout=3 hpc "printf 'login|reachable\n'; oarstat -u \"\$USER\" 2>/dev/null" 2>/dev/null || true)
     if ! printf '%s\n' "$output" | grep -q '^login|reachable$'; then
         printf "login|unreachable\n"
         printf "jobs|not available\n"
@@ -345,15 +345,19 @@ collect_status() {
 }
 
 refresh_status() {
-    local data line key value
-    data=$(run_spinner "refreshing HPC status" collect_status || true)
+    load_status "$(run_spinner "refreshing HPC status" collect_status || true)"
+}
+
+# load_status DATA: keep the "key|value" lines of collect_status as the cached status
+load_status() {
+    local key value
     while IFS='|' read -r key value; do
         case "$key" in
             login) STATUS_LOGIN="$value" ;;
             jobs) STATUS_JOBS="$value" ;;
             tunnels) STATUS_TUNNELS="$value" ;;
         esac
-    done <<< "$data"
+    done <<< "$1"
     STATUS_UPDATED=$(date '+%H:%M:%S' 2>/dev/null || date)
 }
 
@@ -440,7 +444,7 @@ launch_session() {
     fi
 
     # oarsub's whole output comes back: the job id on success, its rejection message otherwise
-    out=$(ssh hpc bash -s "'$cores'" "'$wall'" "'$MAIL_TO'" 2>"$SSH_ERR" << 'REMOTE'
+    out=$(rssh hpc bash -s "'$cores'" "'$wall'" "'$MAIL_TO'" 2>"$SSH_ERR" << 'REMOTE'
 CORES="$1"
 WALL="$2"
 MAIL="$3"
@@ -487,61 +491,75 @@ REMOTE
     fi
 
     echo -e "${GREEN}Job $JOBID submitted.${NC} Waiting for it to start..."
-    sleep 5
-
-    local attempts=0
-    while true; do
-        # a dropped poll just means "try again": the job keeps queueing either way
-        STATE=$(ssh hpc "oarstat -f -j '$JOBID' 2>/dev/null | grep 'state =' | head -1 | awk -F= '{print \$2}' | tr -d ' '" 2>/dev/null) || STATE=""
-        case "$STATE" in
-            Running) break ;;
-            Waiting|toLaunch|Launching|Hold|"") ;;
-            *)
-                echo -e "${RED}Job $JOBID is no longer waiting (state: $STATE)${NC}"
-                echo -e "Check logs: ${DIM}ssh hpc 'cat ~/OAR.${JOBID}.stderr'${NC}"
-                return
-                ;;
-        esac
-        attempts=$((attempts + 1))
-        if [ $attempts -gt 60 ]; then
-            echo -e "${YELLOW}Still queued after 5 min. Job $JOBID is waiting for resources.${NC}"
-            echo -e "Use option 2 to connect later, or option 4 to cancel."
-            return
-        fi
-        echo -e "  ${DIM}${STATE:-Queued}... ($((attempts * 5))s)${NC}"
-        sleep 5
-    done
-
     connect_to_job "$JOBID" "$mode"
+}
+
+# follow_job ID: one streamed ssh waits on the cluster until the job's Jupyter prints its URL, the job ends,
+# or the wait times out (5 min in the queue, then 5 min for Jupyter). Sets NODE and URL and returns 0, or
+# says why not and returns 1. Ctrl+C stops only the waiting; the job keeps running.
+follow_job() {
+    local jobid=$1 kind value state="" ended="" timeout="" start=$SECONDS script
+    NODE="" URL=""
+    # read into a variable: bash 3.2 cannot parse a heredoc with "case" inside <( )
+    IFS= read -r -d '' script << 'FOLLOW'
+id=$1
+deadline=$((SECONDS + 300))
+running=""
+while [ $SECONDS -lt $deadline ]; do
+    info=$(oarstat -f -j "$id" 2>/dev/null)
+    state=$(printf '%s\n' "$info" | awk -F= '/^ *state =/ { gsub(/ /, "", $2); print $2; exit }')
+    node=$(printf '%s\n' "$info" | awk '/assigned_hostnames/ { print $3; exit }')
+    case $state in
+        Running)
+            [ -n "$running" ] || { running=1; deadline=$((SECONDS + 300)); }
+            url=$(grep -o 'http://[^ ]*' ~/OAR."$id".stderr 2>/dev/null | tail -1)
+            if [ -n "$url" ] && [ -n "$node" ]; then echo "NODE $node"; echo "URL $url"; exit 0; fi ;;
+        Waiting|toLaunch|Launching|Hold|"") ;;
+        *) echo "END $state"; exit 0 ;;
+    esac
+    echo "STATE ${state:-Waiting}"
+    sleep 2
+done
+echo "TIMEOUT"
+FOLLOW
+    trap 'printf "\n"' INT
+    while read -r kind value; do
+        case $kind in
+            STATE) state=$value; printf "\r\033[K  ${DIM}%s... (%ss)${NC}" "$value" "$((SECONDS - start))" ;;
+            NODE) NODE=$value ;;
+            URL) URL=$value ;;
+            END) ended=$value ;;
+            TIMEOUT) timeout=1 ;;
+        esac
+    done < <(rssh hpc bash -s "'$jobid'" <<< "$script" 2>"$SSH_ERR")
+    trap - INT
+    [ -z "$state" ] || printf "\r\033[K"
+    if [ -n "$URL" ] && is_name "$NODE"; then
+        return 0
+    elif [ -n "$ended" ]; then
+        echo -e "${RED}Job $jobid is no longer waiting (state: $ended)${NC}"
+        echo -e "Check logs: ${DIM}ssh hpc 'cat ~/OAR.${jobid}.stderr'${NC}"
+    elif [ -n "$timeout" ] && [ "$state" = Running ]; then
+        echo -e "${RED}Jupyter didn't start.${NC}"
+        echo -e "Check logs: ${DIM}ssh hpc 'cat ~/OAR.${jobid}.stderr'${NC}"
+    elif [ -n "$timeout" ]; then
+        echo -e "${YELLOW}Still queued after 5 min. Job $jobid is waiting for resources.${NC}"
+        echo -e "Use option 2 to connect later, or option 4 to cancel."
+    else
+        echo -e "${YELLOW}Stopped waiting.${NC} Job $jobid keeps running on the cluster: connect later with option 2, cancel with option 4."
+        [ -s "$SSH_ERR" ] && tail -n 3 "$SSH_ERR" | sed 's/^/    /'
+    fi
+    return 1
 }
 
 connect_to_job() {
     local jobid="$1"
     local mode="${2:-1}"
 
-    local node
-    node=$(ssh hpc "oarstat -f -j '$jobid' 2>/dev/null | grep 'assigned_hostnames' | awk '{print \$3}'" 2>"$SSH_ERR") || node=""
-    if [ -z "$node" ] || ! is_name "$node"; then
-        ssh_failed "Could not find the node for job $jobid (is it running yet? see option 3)."
-        return
-    fi
-
-    echo -e "${CYAN}Running on ${BOLD}$node${NC}${CYAN}. Waiting for Jupyter...${NC}"
-
-    local url=""
-    for i in $(seq 1 30); do
-        url=$(ssh hpc "grep -o 'http://[^ ]*' ~/OAR.'${jobid}'.stderr 2>/dev/null | tail -1" 2>/dev/null) || url=""
-        if [ -n "$url" ]; then
-            break
-        fi
-        sleep 2
-    done
-
-    if [ -z "$url" ]; then
-        echo -e "${RED}Jupyter didn't start.${NC}"
-        echo -e "Check logs: ${DIM}ssh hpc 'cat ~/OAR.${jobid}.stderr'${NC}"
-        return
-    fi
+    echo -e "${CYAN}Waiting for Jupyter on job $jobid...${NC}"
+    follow_job "$jobid" || return
+    local node=$NODE url=$URL
+    echo -e "${CYAN}Running on ${BOLD}$node${NC}"
 
     # Parse actual port from Jupyter URL
     local remote_port
@@ -586,7 +604,7 @@ my_jobs() {
     echo ""
     echo -e "${DIM}Loading, please wait...${NC}"
     local output
-    output=$(ssh hpc "oarstat -u \"\$USER\"" 2>"$SSH_ERR") || {
+    output=$(rssh hpc "oarstat -u \"\$USER\"" 2>"$SSH_ERR") || {
         ssh_failed "Could not list your jobs on HPC."
         return
     }
@@ -603,7 +621,7 @@ my_jobs() {
 # cancel_jobs "ID ..."  oardel each job; a job's log files are deleted only after its oardel succeeded.
 # Failures are reported on stderr (-> $SSH_ERR); status is non-zero if any job was not cancelled.
 cancel_jobs() {
-    ssh hpc bash -s "'$1'" 2>"$SSH_ERR" << 'REMOTE'
+    rssh hpc bash -s "'$1'" 2>"$SSH_ERR" << 'REMOTE'
 fail=0
 for j in $1; do
     if out=$(oardel "$j" 2>&1); then
@@ -621,7 +639,7 @@ cancel_job() {
     echo ""
     echo -e "${DIM}Loading, please wait...${NC}"
     local output
-    output=$(ssh hpc "oarstat -u \"\$USER\"" 2>"$SSH_ERR") || {
+    output=$(rssh hpc "oarstat -u \"\$USER\"" 2>"$SSH_ERR") || {
         ssh_failed "Could not list your jobs on HPC."
         return
     }
@@ -663,7 +681,7 @@ connect_existing() {
     echo ""
     echo -e "${DIM}Loading, please wait...${NC}"
     local output
-    output=$(ssh hpc "oarstat -u \"\$USER\"" 2>"$SSH_ERR") || {
+    output=$(rssh hpc "oarstat -u \"\$USER\"" 2>"$SSH_ERR") || {
         ssh_failed "Could not list your jobs on HPC."
         return
     }
@@ -714,7 +732,7 @@ connect_existing() {
 
     if [ "$mode" = "2" ]; then
         local node
-        node=$(ssh hpc "oarstat -f -j '$jobid' | grep 'assigned_hostnames' | awk '{print \$3}'" 2>"$SSH_ERR") || node=""
+        node=$(rssh hpc "oarstat -f -j '$jobid' | grep 'assigned_hostnames' | awk '{print \$3}'" 2>"$SSH_ERR") || node=""
         if [ -z "$node" ] || ! is_name "$node"; then
             ssh_failed "Could not find the node for job $jobid (is it running yet? see option 3)."
             return
@@ -726,11 +744,21 @@ connect_existing() {
     fi
 }
 
-# Entry point
+# Entry point. The first status check runs in the background (stopped after 15 s), so the menu shows at once.
 welcome
-refresh_status
+STATUS_FILE="${TMPDIR:-/tmp}/lip6-status.$$"
+( collect_status > "$STATUS_FILE.part" 2>/dev/null && mv "$STATUS_FILE.part" "$STATUS_FILE" ) &
+PROBE_PID=$!
+( end=$((SECONDS + 15)); while kill -0 "$PROBE_PID" 2>/dev/null; do
+    [ $SECONDS -lt $end ] || { kill "$PROBE_PID"; break; }; sleep 1; done ) 2>/dev/null &
+trap 'rm -f "$SSH_ERR" "$STATUS_FILE" "$STATUS_FILE.part"; kill "$PROBE_PID" 2>/dev/null' EXIT
+STATUS_LOGIN="checking..."
 
 while true; do
+    if [ -f "$STATUS_FILE" ]; then
+        load_status "$(cat "$STATUS_FILE")"
+        rm -f "$STATUS_FILE"
+    fi
     echo ""
     render_status
     show_menu

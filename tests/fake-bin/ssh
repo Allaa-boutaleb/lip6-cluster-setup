@@ -3,7 +3,9 @@
 # command locally, the way a remote shell would (argv joined with spaces, then re-split), stdin passed through.
 # Knobs: FAKE_SSH=down -> "connection timed out", exit 255; FAKE_SSH_DOWN="hpc conv" -> the same for those hosts only.
 # FAKE_SESSION_RC -> exit status of a login (no command). FAKE_TUNNEL=fail -> an -N tunnel fails to bind.
+# FAKE_SSH_SLOW=N -> every call takes N more seconds.
 echo "ssh $*" >> "${FAKE_LOG:-/dev/null}"
+[ -z "${FAKE_SSH_SLOW:-}" ] || /bin/sleep "$FAKE_SSH_SLOW"
 if [ "$FAKE_SSH" = down ]; then
     echo "ssh: connect to host fake port 22: Connection timed out" >&2
     exit 255

@@ -167,7 +167,7 @@ ssh_failed() {
 
 # ssh_session ARGS: interactive ssh; its status is the remote shell's, only 255 means ssh itself failed
 ssh_session() {
-    ssh "$@"
+    rssh "$@"
     [ $? -ne 255 ] || echo -e "\n${RED}Could not connect.${NC} ${DIM}Check your network/VPN, then try again (test the link: ssh conv true).${NC}"
 }
 
@@ -401,7 +401,7 @@ EOF
 
 collect_status() {
     local raw running pending tunnels
-    raw=$(ssh -n -o BatchMode=yes -o ConnectTimeout=3 conv "printf 'front|reachable\n'; squeue -h -u \"\$USER\" -o '%T|%R' 2>/dev/null" 2>/dev/null || true)
+    raw=$(rssh -n -o BatchMode=yes -o ConnectTimeout=3 conv "printf 'front|reachable\n'; squeue -h -u \"\$USER\" -o '%T|%R' 2>/dev/null" 2>/dev/null || true)
     if ! printf '%s\n' "$raw" | grep -q '^front|reachable$'; then
         printf "front|unreachable\n"
         printf "jobs|not available\n"
@@ -420,8 +420,12 @@ collect_status() {
 }
 
 refresh_status() {
-    local data line key value
-    data=$(run_spinner "refreshing Convergence status" collect_status || true)
+    load_status "$(run_spinner "refreshing Convergence status" collect_status || true)"
+}
+
+# load_status DATA: keep the "key|value" lines of collect_status as the cached status
+load_status() {
+    local key value
     while IFS='|' read -r key value; do
         case "$key" in
             front) STATUS_FRONT="$value" ;;
@@ -429,7 +433,7 @@ refresh_status() {
             tunnels) STATUS_TUNNELS="$value" ;;
             gpu) STATUS_GPU="$value" ;;
         esac
-    done <<< "$data"
+    done <<< "$1"
     STATUS_UPDATED=$(date '+%H:%M:%S' 2>/dev/null || date)
 }
 
@@ -602,25 +606,21 @@ launch_session() {
     echo -e "${CYAN}Submitting Jupyter Lab: ${num_gpus}x ${GPU_TYPE}, ${wall}...${NC}"
     echo -e "${DIM}sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA}${NC}"
 
-    spinner_step "checking Jupyter env"
-    jupyter_check=$(ssh conv 'test -x ~/.venvs/conv_jupyter/bin/jupyter && echo ok' 2>"$SSH_ERR")
-    if [ $? -eq 255 ]; then
-        printf '\r\033[K'
-        ssh_failed "Cannot reach the Convergence cluster."
-        return
-    fi
-    if [ -z "$jupyter_check" ]; then
-        spinner_warn "Jupyter missing; installing in ~/.venvs/conv_jupyter"
-        if ! ssh conv 'source /etc/profile.d/modules.sh 2>/dev/null; module purge; module load python/anaconda3; python -m venv ~/.venvs/conv_jupyter && ~/.venvs/conv_jupyter/bin/python -m pip install --quiet --upgrade pip jupyterlab && test -x ~/.venvs/conv_jupyter/bin/jupyter' 2>"$SSH_ERR"; then
-            ssh_failed "Failed to install Jupyter in ~/.venvs/conv_jupyter."
-            return
-        fi
-    else
-        spinner_done "Jupyter env ready"
-    fi
+    echo -e "${DIM}(the first launch also installs Jupyter in ~/.venvs/conv_jupyter, which takes a few minutes)${NC}"
 
-    # sbatch --parsable prints just the job id; on rejection its message comes back instead
-    out=$(ssh conv bash -s "'$num_gpus'" "'$GPU_TYPE'" "'$wall'" "'$job_name'" "'$CPU_FEATURE'" "'$MEMORY'" "'$NODE_LIST'" "'$MAIL_TO'" 2>"$SSH_ERR" << 'REMOTE'
+    # One ssh: install Jupyter if missing, write the job script, submit. sbatch --parsable prints just the
+    # job id; on rejection its message comes back instead.
+    local out rc
+    out=$(rssh conv bash -s "'$num_gpus'" "'$GPU_TYPE'" "'$wall'" "'$job_name'" "'$CPU_FEATURE'" "'$MEMORY'" "'$NODE_LIST'" "'$MAIL_TO'" 2>"$SSH_ERR" << 'REMOTE'
+if [ ! -x ~/.venvs/conv_jupyter/bin/jupyter ]; then
+    { source /etc/profile.d/modules.sh; module purge; module load python/anaconda3; python -m venv ~/.venvs/conv_jupyter \
+        && ~/.venvs/conv_jupyter/bin/python -m pip install --quiet --upgrade pip jupyterlab; } > ~/.conv_jupyter_install.log 2>&1
+    if [ ! -x ~/.venvs/conv_jupyter/bin/jupyter ]; then
+        echo "Failed to install Jupyter in ~/.venvs/conv_jupyter (full log: ~/.conv_jupyter_install.log):"
+        tail -n 5 ~/.conv_jupyter_install.log
+        exit 1
+    fi
+fi
 NUM_GPUS="$1"
 GPU_TYPE="$2"
 WALL="$3"
@@ -662,6 +662,11 @@ JOBSCRIPT
 sbatch --parsable ~/._conv_jupyter.sh 2>&1
 REMOTE
     )
+    rc=$?
+    if [ $rc -eq 255 ]; then
+        ssh_failed "Cannot reach the Convergence cluster."
+        return
+    fi
     JOBID=$(printf '%s\n' "$out" | sed -n 's/^\([0-9][0-9]*\)\(;.*\)\{0,1\}$/\1/p' | tail -n 1)
     if ! is_int "$JOBID"; then
         submit_failed "$out"
@@ -670,41 +675,65 @@ REMOTE
 
     echo -e "${GREEN}Job $JOBID submitted.${NC} Waiting for it to start..."
     echo -e "${DIM}(Convergence queue can take minutes to hours depending on load)${NC}"
-    sleep 5
+    connect_to_job "$JOBID" "$mode"
+}
 
-    local attempts=0
-    while true; do
-        # a dropped poll just means "try again": the job keeps queueing either way
-        STATE=$(ssh conv bash -c "\"squeue -j $JOBID -h -o '%T'\"" 2>/dev/null) || STATE=""
-        case "$STATE" in
-            RUNNING) break ;;
-            PENDING|CONFIGURING) ;;
-            "")
-                local sacct_state
-                sacct_state=$(ssh conv "sacct -j '$JOBID' --format=State -X --noheader 2>/dev/null | tr -d ' '" 2>/dev/null) || sacct_state=""
-                if [ -n "$sacct_state" ] && [ "$sacct_state" != "PENDING" ] && [ "$sacct_state" != "RUNNING" ]; then
-                    echo -e "${RED}Job ended (state: ${sacct_state})${NC}"
-                    echo -e "Check logs: ${DIM}ssh conv 'cat ~/${job_name}-${JOBID}.err'${NC}"
-                    return
-                fi
-                ;;
-            *)
-                echo -e "${RED}Job $JOBID is no longer waiting (state: $STATE)${NC}"
-                echo -e "Check logs: ${DIM}ssh conv 'cat ~/${job_name}-${JOBID}.err'${NC}"
-                return
-                ;;
+# follow_job ID: one streamed ssh waits on the cluster until the job's Jupyter prints its URL, the job ends,
+# or the wait times out (10 min in the queue, then 5 min for Jupyter). Sets NODE and URL and returns 0, or
+# says why not and returns 1. Ctrl+C stops only the waiting; the job keeps running.
+follow_job() {
+    local jobid=$1 kind value state="" ended="" timeout="" start=$SECONDS script
+    NODE="" URL=""
+    # read into a variable: bash 3.2 cannot parse a heredoc with "case" inside <( )
+    IFS= read -r -d '' script << 'FOLLOW'
+id=$1
+deadline=$((SECONDS + 600))
+running=""
+while [ $SECONDS -lt $deadline ]; do
+    st=$(squeue -j "$id" -h -o '%T %N' 2>/dev/null)
+    [ -n "$st" ] || st=$(sacct -j "$id" --format=State -X --noheader 2>/dev/null | awk 'NR == 1 { print $1 }')
+    set -- $st
+    case $1 in
+        RUNNING)
+            [ -n "$running" ] || { running=1; deadline=$((SECONDS + 300)); }
+            url=$(grep -o 'http://[^ ]*' ~/*-"$id".err 2>/dev/null | tail -1)
+            if [ -n "$url" ]; then echo "NODE $2"; echo "URL $url"; exit 0; fi ;;
+        PENDING|CONFIGURING|"") ;;
+        *) echo "END $1"; exit 0 ;;
+    esac
+    echo "STATE ${1:-PENDING}"
+    sleep 2
+done
+echo "TIMEOUT"
+FOLLOW
+    trap 'printf "\n"' INT
+    while read -r kind value; do
+        case $kind in
+            STATE) state=$value; printf "\r\033[K  ${DIM}%s... (%ss)${NC}" "$value" "$((SECONDS - start))" ;;
+            NODE) NODE=$value ;;
+            URL) URL=$value ;;
+            END) ended=$value ;;
+            TIMEOUT) timeout=1 ;;
         esac
-        attempts=$((attempts + 1))
-        if [ $attempts -gt 120 ]; then
-            echo -e "${YELLOW}Still queued after 10 min. Job $JOBID is waiting for GPUs.${NC}"
-            echo -e "Use option 2 to connect later, or option 5 to cancel."
-            return
-        fi
-        echo -e "  ${DIM}${STATE:-PENDING}... ($((attempts * 5))s)${NC}"
-        sleep 5
-    done
-
-    connect_to_job "$JOBID" "$mode" "$job_name"
+    done < <(rssh conv bash -s "'$jobid'" <<< "$script" 2>"$SSH_ERR")
+    trap - INT
+    [ -z "$state" ] || printf "\r\033[K"
+    if [ -n "$URL" ] && is_name "$NODE"; then
+        return 0
+    elif [ -n "$ended" ]; then
+        echo -e "${RED}Job ended (state: ${ended})${NC}"
+        echo -e "Check logs: ${DIM}ssh conv 'cat ~/*-${jobid}.err'${NC}"
+    elif [ -n "$timeout" ] && [ "$state" = RUNNING ]; then
+        echo -e "${RED}Jupyter didn't start.${NC}"
+        echo -e "Check logs: ${DIM}ssh conv 'cat ~/*-${jobid}.err'${NC}"
+    elif [ -n "$timeout" ]; then
+        echo -e "${YELLOW}Still queued after 10 min. Job $jobid is waiting for GPUs.${NC}"
+        echo -e "Use option 2 to connect later, or option 5 to cancel."
+    else
+        echo -e "${YELLOW}Stopped waiting.${NC} Job $jobid keeps running on the cluster: connect later with option 2, cancel with option 5."
+        [ -s "$SSH_ERR" ] && tail -n 3 "$SSH_ERR" | sed 's/^/    /'
+    fi
+    return 1
 }
 
 submit_custom() {
@@ -737,7 +766,7 @@ submit_custom() {
     [ -n "$MAIL_TO" ] && mail_opts=" --mail-type=ALL --mail-user='${MAIL_TO}'"
     echo -e "${DIM}sbatch --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA} ${script_path}${NC}"
     # script_path is unquoted on purpose so the cluster expands ~ (is_path allows only safe characters)
-    out=$(ssh conv "sbatch --parsable --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA}${mail_opts} --output=%x-%j.out --error=%x-%j.err ${script_path} 2>&1" 2>"$SSH_ERR")
+    out=$(rssh conv "sbatch --parsable --job-name='${job_name}' --nodes=1 --gpus-per-node='${GPU_TYPE}:${num_gpus}' --time='${wall}'${SLURM_EXTRA}${mail_opts} --output=%x-%j.out --error=%x-%j.err ${script_path} 2>&1" 2>"$SSH_ERR")
     JOBID=$(printf '%s\n' "$out" | sed -n 's/^\([0-9][0-9]*\)\(;.*\)\{0,1\}$/\1/p' | tail -n 1)
     if ! is_int "$JOBID"; then
         submit_failed "$out"
@@ -753,31 +782,11 @@ submit_custom() {
 connect_to_job() {
     local jobid="$1"
     local mode="${2:-1}"
-    local job_name="${3:-gpu-session}"
 
-    local node
-    node=$(ssh conv bash -c "\"squeue -j $jobid -h -o '%N'\"" 2>"$SSH_ERR") || node=""
-    if [ -z "$node" ] || ! is_name "$node"; then
-        ssh_failed "Could not find the node for job $jobid (is it running yet? see option 3)."
-        return
-    fi
-
-    echo -e "${CYAN}Running on ${BOLD}$node${NC}${CYAN}. Waiting for Jupyter...${NC}"
-
-    local url=""
-    for i in $(seq 1 30); do
-        url=$(ssh conv "grep -o 'http://[^ ]*' ~/*-'${jobid}'.err 2>/dev/null | tail -1" 2>/dev/null) || url=""
-        if [ -n "$url" ]; then
-            break
-        fi
-        sleep 2
-    done
-
-    if [ -z "$url" ]; then
-        echo -e "${RED}Jupyter didn't start.${NC}"
-        echo -e "Check logs: ${DIM}ssh conv 'cat ~/*-${jobid}.err'${NC}"
-        return
-    fi
+    echo -e "${CYAN}Waiting for Jupyter on job $jobid...${NC}"
+    follow_job "$jobid" || return
+    local node=$NODE url=$URL
+    echo -e "${CYAN}Running on ${BOLD}$node${NC}"
 
     local remote_port
     remote_port=$(printf '%s\n' "$url" | sed -n 's|.*:\([0-9][0-9]*\)/.*|\1|p' | head -1)
@@ -823,7 +832,7 @@ my_jobs() {
     echo -e "${DIM}Loading, please wait...${NC}"
 
     local raw
-    raw=$(ssh conv bash -c "\"squeue -h -u \$USER -o '%i|%j|%T|%M|%l|%L|%R'\"" 2>"$SSH_ERR") || {
+    raw=$(rssh conv bash -c "\"squeue -h -u \$USER -o '%i|%j|%T|%M|%l|%L|%R'\"" 2>"$SSH_ERR") || {
         ssh_failed "Could not list your jobs on Convergence."
         return
     }
@@ -872,7 +881,7 @@ my_jobs() {
             return
         fi
         echo ""
-        ssh conv "sacct -j '$jobid' --format='JobID,JobName,NodeList,AllocTres%80,Start,End,State' -X" 2>"$SSH_ERR" \
+        rssh conv "sacct -j '$jobid' --format='JobID,JobName,NodeList,AllocTres%80,Start,End,State' -X" 2>"$SSH_ERR" \
             || ssh_failed "Could not read the details of job $jobid."
     fi
     echo ""
@@ -881,7 +890,7 @@ my_jobs() {
 # cancel_jobs "ID ..."  scancel each job; a job's log files are deleted only after its scancel succeeded.
 # Failures are reported on stderr (-> $SSH_ERR); status is non-zero if any job was not cancelled.
 cancel_jobs() {
-    ssh conv bash -s "'$1'" 2>"$SSH_ERR" << 'REMOTE'
+    rssh conv bash -s "'$1'" 2>"$SSH_ERR" << 'REMOTE'
 fail=0
 for j in $1; do
     out=$(scancel "$j" 2>&1)
@@ -901,7 +910,7 @@ cancel_job() {
     echo -e "${DIM}Loading, please wait...${NC}"
 
     local raw
-    raw=$(ssh conv bash -c "\"squeue -h -u \$USER -o '%i|%j|%T|%M|%l|%R'\"" 2>"$SSH_ERR") || {
+    raw=$(rssh conv bash -c "\"squeue -h -u \$USER -o '%i|%j|%T|%M|%l|%R'\"" 2>"$SSH_ERR") || {
         ssh_failed "Could not list your jobs on Convergence."
         return
     }
@@ -953,7 +962,7 @@ cluster_status() {
     echo ""
     echo -e "${BOLD}Cluster status:${NC}"
     echo ""
-    ssh conv "sinfo -p convergence --Node -O 'nodelist:10,cpusstate:16,memory:10,allocmem:10,gres:35,gresused:35,statelong:12'" 2>"$SSH_ERR" \
+    rssh conv "sinfo -p convergence --Node -O 'nodelist:10,cpusstate:16,memory:10,allocmem:10,gres:35,gresused:35,statelong:12'" 2>"$SSH_ERR" \
         || ssh_failed "Could not read the cluster status."
     echo ""
 }
@@ -963,7 +972,7 @@ connect_existing() {
     echo -e "${DIM}Loading, please wait...${NC}"
 
     local raw
-    raw=$(ssh conv bash -c "\"squeue -h -u \$USER -o '%i|%j|%T|%M|%l|%L|%R'\"" 2>"$SSH_ERR") || {
+    raw=$(rssh conv bash -c "\"squeue -h -u \$USER -o '%i|%j|%T|%M|%l|%L|%R'\"" 2>"$SSH_ERR") || {
         ssh_failed "Could not list your jobs on Convergence."
         return
     }
@@ -979,7 +988,6 @@ connect_existing() {
     done <<< "$raw"
 
     local jobid=""
-    local job_name=""
 
     if [ ${#job_ids[@]} -eq 1 ]; then
         jobid="${job_ids[0]}"
@@ -1009,7 +1017,6 @@ connect_existing() {
         *" $jobid "*) ;;
         *) echo -e "${RED}Job $jobid is not one of your jobs. Pick an ID from the list (option 3 shows it again).${NC}"; return ;;
     esac
-    job_name=$(printf '%s\n' "$raw" | awk -F'|' -v j="$jobid" '$1 == j {print $2; exit}')
 
     echo ""
     echo -e "${BOLD}How do you want to connect?${NC}"
@@ -1026,7 +1033,7 @@ connect_existing() {
 
     if [ "$mode" = "2" ]; then
         local node
-        node=$(ssh conv bash -c "\"squeue -j $jobid -h -o '%N'\"" 2>"$SSH_ERR") || node=""
+        node=$(rssh conv bash -c "\"squeue -j $jobid -h -o '%N'\"" 2>"$SSH_ERR") || node=""
         if [ -z "$node" ] || ! is_name "$node"; then
             ssh_failed "Could not find the node for job $jobid (is it running yet? see option 3)."
             return
@@ -1034,15 +1041,25 @@ connect_existing() {
         echo -e "${CYAN}Connecting to $node...${NC}"
         ssh_session -t -J conv "${node}.convergence.lip6.fr"
     else
-        connect_to_job "$jobid" "$mode" "${job_name:-gpu-session}"
+        connect_to_job "$jobid" "$mode"
     fi
 }
 
-# Entry point
+# Entry point. The first status check runs in the background (stopped after 15 s), so the menu shows at once.
 welcome
-refresh_status
+STATUS_FILE="${TMPDIR:-/tmp}/lip6-status.$$"
+( collect_status > "$STATUS_FILE.part" 2>/dev/null && mv "$STATUS_FILE.part" "$STATUS_FILE" ) &
+PROBE_PID=$!
+( end=$((SECONDS + 15)); while kill -0 "$PROBE_PID" 2>/dev/null; do
+    [ $SECONDS -lt $end ] || { kill "$PROBE_PID"; break; }; sleep 1; done ) 2>/dev/null &
+trap 'rm -f "$SSH_ERR" "$STATUS_FILE" "$STATUS_FILE.part"; kill "$PROBE_PID" 2>/dev/null' EXIT
+STATUS_FRONT="checking..."
 
 while true; do
+    if [ -f "$STATUS_FILE" ]; then
+        load_status "$(cat "$STATUS_FILE")"
+        rm -f "$STATUS_FILE"
+    fi
     echo ""
     render_status
     show_menu

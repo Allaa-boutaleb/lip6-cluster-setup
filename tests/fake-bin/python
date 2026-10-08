@@ -1,0 +1,4 @@
+#!/bin/sh
+# Test stub: the conv launch installs Jupyter with "python -m venv" + pip when it is missing; never hit the network.
+echo "python $*" >> "${FAKE_LOG:-/dev/null}"
+exit 1

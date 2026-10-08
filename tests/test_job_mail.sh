@@ -13,6 +13,8 @@ fail() {
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/lip6-mail.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/home"
+# the conv launch installs Jupyter first when it is missing: never let it try (that would hit the network)
+mkdir -p "$tmp/home/.venvs/conv_jupyter/bin" && printf '#!/bin/sh\n' > "$tmp/home/.venvs/conv_jupyter/bin/jupyter" && chmod +x "$tmp/home/.venvs/conv_jupyter/bin/jupyter"
 
 # Fake cluster tools. ssh runs the command string the way a remote shell would:
 # all argv joined with spaces, then re-split. It is a function, never a real ssh.
