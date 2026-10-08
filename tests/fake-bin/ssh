@@ -1,0 +1,23 @@
+#!/bin/bash
+# Test stub for ssh. It never connects anywhere: it drops the options and the host and runs the remote
+# command locally, the way a remote shell would (argv joined with spaces, then re-split), stdin passed through.
+# Knobs: FAKE_SSH=down -> "connection timed out", exit 255. FAKE_SESSION_RC -> exit status of a login (no command).
+echo "ssh $*" >> "${FAKE_LOG:-/dev/null}"
+if [ "$FAKE_SSH" = down ]; then
+    echo "ssh: connect to host fake port 22: Connection timed out" >&2
+    exit 255
+fi
+tunnel=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -O) exit 0 ;;
+        -N) tunnel=1; shift ;;
+        -[oJLRDpilFSEbcmwWBIQ]) shift 2 ;;
+        -*) shift ;;
+        *) break ;;
+    esac
+done
+shift   # the host
+[ -n "$tunnel" ] && exec /bin/sleep 86400
+[ $# -gt 0 ] || exit "${FAKE_SESSION_RC:-0}"
+exec /bin/bash -c "$*"

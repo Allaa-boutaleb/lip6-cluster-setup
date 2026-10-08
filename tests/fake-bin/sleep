@@ -1,0 +1,3 @@
+#!/bin/bash
+# Test stub: every wait in the tools is instant.
+exec /bin/sleep 0.01

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Test stub: the tools key their /tmp tunnel dir on this name; keep tests off the real user's.
+echo fake-tester

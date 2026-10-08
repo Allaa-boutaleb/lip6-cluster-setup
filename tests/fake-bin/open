@@ -1,0 +1,3 @@
+#!/bin/sh
+# Test stub: a browser opener that only logs.
+echo "$(basename "$0") $*" >> "${FAKE_LOG:-/dev/null}"

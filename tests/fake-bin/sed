@@ -1,0 +1,13 @@
+#!/bin/bash
+# Test shim: the cluster-side scripts use GNU "sed -i EXPR FILE"; BSD sed (macOS) wants "-i ''".
+real=""
+IFS=:
+for d in $PATH; do
+    if [ -x "$d/sed" ] && ! [ "$d/sed" -ef "$0" ]; then real="$d/sed"; break; fi
+done
+unset IFS
+if [ "$1" = -i ] && ! "$real" --version >/dev/null 2>&1; then
+    shift
+    exec "$real" -i '' "$@"
+fi
+exec "$real" "$@"

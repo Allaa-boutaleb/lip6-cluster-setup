@@ -17,6 +17,7 @@ mkdir -p "$tmp/bin" "$tmp/home"
 # Fake cluster tools. ssh runs the command string the way a remote shell would:
 # all argv joined with spaces, then re-split. It is a function, never a real ssh.
 ssh() { shift; HOME="$tmp/home" PATH="$tmp/bin:$PATH" bash -c "$*"; }
+SSH_ERR=/dev/null   # the real manager sets it; the line under test redirects ssh's stderr there
 [ "$(type -t ssh)" = function ] || fail "ssh must be the local stub"
 
 REAL_SED=$(command -v sed)
@@ -30,7 +31,7 @@ chmod +x "$tmp/bin/sbatch" "$tmp/bin/oarsub" "$tmp/bin/sed"
 # run_remote FILE HOST: feed FILE's remote heredoc to the exact `ssh HOST bash -s ...` line
 run_remote() {
     local file="$1" host="$2" body line
-    body=$(awk "/<< 'REMOTE'\$/ { f=1; next } /^REMOTE\$/ { f=0 } f" "$file")
+    body=$(awk "/<< 'REMOTE'\$/ { f=1; next } /^REMOTE\$/ { exit } f" "$file")
     line=$(grep -m1 "ssh $host bash -s" "$file" | sed "s/^.*\\(ssh $host bash -s .*\\) << 'REMOTE'\$/\\1/")
     [ -n "$body" ] && [ -n "$line" ] || fail "cannot find the remote heredoc in $file"
     printf '%s\n' "$body" | eval "$line" >/dev/null 2>&1 || true

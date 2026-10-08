@@ -1,0 +1,129 @@
+#!/bin/bash
+# Fake Slurm/OAR tools, called as: _sched TOOL ARGS... Job state lives in $FAKE_STATE/jobs ("ID STATE NAME").
+# Knobs: FAKE_<TOOL>=fail makes that tool reject like the real one (sbatch squeue scancel sinfo oarsub oarstat oardel);
+# FAKE_SCANCEL_IDS / FAKE_OARDEL_IDS = ids to refuse; FAKE_NEW_STATE = state of a job just submitted;
+# FAKE_CLUSTER=name makes "sbatch --parsable" print "ID;name" like a multi-cluster site.
+tool=$1; shift
+S="${FAKE_STATE:?FAKE_STATE is not set}"
+touch "$S/jobs"
+echo "$tool $*" >> "${FAKE_LOG:-/dev/null}"
+down() { eval "[ \"\$FAKE_$1\" = fail ]"; }
+has_job() { awk -v j="$1" '$1==j{f=1} END{exit !f}' "$S/jobs"; }
+state_of() { awk -v j="$1" '$1==j{print $2}' "$S/jobs"; }
+new_id() { awk 'BEGIN{m=4241} $1>m{m=$1} END{print m+1}' "$S/jobs"; }
+drop_job() { grep -v "^$1 " "$S/jobs" > "$S/jobs.t"; mv "$S/jobs.t" "$S/jobs"; }
+# jobs_fmt FORMAT [ID]: one line per job with %i %j %T %N %R %M %l %L filled in
+jobs_fmt() {
+    awk -v f="$1" -v want="$2" '
+        want == "" || $1 == want {
+            n = ($2 == "RUNNING" || $2 == "Running") ? "node01" : ""
+            r = n != "" ? n : "(Priority)"
+            o = f
+            gsub("%i", $1, o); gsub("%j", $3, o); gsub("%T", $2, o); gsub("%N", n, o)
+            gsub("%R", r, o); gsub("%M", "0:10", o); gsub("%l", "8:00:00", o); gsub("%L", "7:50:00", o)
+            print o
+        }' "$S/jobs"
+}
+case "$tool" in
+sbatch)
+    if down SBATCH; then
+        echo "sbatch: error: QOSMaxSubmitJobPerUserLimit" >&2
+        echo "sbatch: error: Batch job submission failed: Job violates accounting/QOS policy (job submit limit, user's size and/or time limits)" >&2
+        exit 1
+    fi
+    parsable="" name=job file=""
+    for a in "$@"; do
+        case "$a" in
+            --parsable) parsable=1 ;;
+            --job-name=*) name=${a#--job-name=} ;;
+            -*) ;;
+            *) file=$a ;;
+        esac
+    done
+    if [ ! -f "$file" ]; then
+        echo "sbatch: error: Unable to open file $file" >&2
+        exit 1
+    fi
+    id=$(new_id)
+    echo "$id ${FAKE_NEW_STATE:-RUNNING} $name" >> "$S/jobs"
+    if [ -n "$parsable" ]; then echo "$id${FAKE_CLUSTER:+;$FAKE_CLUSTER}"; else echo "Submitted batch job $id"; fi
+    ;;
+squeue)
+    down SQUEUE && { echo "squeue: error: Unable to contact slurm controller (connect failure)" >&2; exit 1; }
+    fmt="" job=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -o) fmt=$2; shift 2 ;;
+            -j) job=$2; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [ -n "$job" ]; then
+        case "$(state_of "$job")" in
+            RUNNING|PENDING|CONFIGURING) ;;
+            *) echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1 ;;
+        esac
+    fi
+    jobs_fmt "$fmt" "$job"
+    ;;
+scancel)
+    rc=0
+    for j in "$@"; do
+        if down SCANCEL || ! has_job "$j"; then
+            echo "scancel: error: Kill job error on job id $j: Invalid job id specified" >&2; rc=1
+        elif case " $FAKE_SCANCEL_IDS " in *" $j "*) true ;; *) false ;; esac; then
+            echo "scancel: error: Kill job error on job id $j: Access/permission denied" >&2; rc=1
+        else
+            drop_job "$j"
+        fi
+    done
+    exit $rc
+    ;;
+sacct)
+    job="" bare=""
+    while [ $# -gt 0 ]; do case "$1" in -j) job=$2; shift 2 ;; --noheader) bare=1; shift ;; *) shift ;; esac; done
+    has_job "$job" || exit 0
+    if [ -n "$bare" ]; then printf '  %s  \n' "$(state_of "$job")"; else printf '%s %s\n' "$job" "$(state_of "$job")"; fi
+    ;;
+sinfo)
+    down SINFO && { echo "sinfo: error: Unable to contact slurm controller" >&2; exit 1; }
+    echo "NODELIST   STATE"
+    echo "node01     mixed"
+    ;;
+oarsub)
+    if down OARSUB; then
+        echo "[ADMISSION RULE] Error: walltime 1000:0:0 is above the limit of this queue" >&2
+        exit 1
+    fi
+    id=$(new_id)
+    echo "$id ${FAKE_NEW_STATE:-Running} job" >> "$S/jobs"
+    echo "[ADMISSION RULE] Set default walltime"
+    echo "OAR_JOB_ID=$id"
+    ;;
+oarstat)
+    down OARSTAT && { echo "oarstat: cannot connect to the OAR database" >&2; exit 1; }
+    job=""
+    for a in "$@"; do last=$prev; prev=$a; [ "$last" = -j ] && job=$a; done
+    if [ -n "$job" ]; then
+        has_job "$job" || exit 0
+        echo "Job_Id: $job"
+        echo "    state = $(state_of "$job")"
+        [ "$(state_of "$job")" = Running ] && echo "    assigned_hostnames = bignode1"
+    else
+        echo "Job id     S User     Duration   System message"
+        echo "---------- - -------- ---------- --------------"
+        awk '{ printf "%-10s %s fake-tester   0:10:00\n", $1, substr($2, 1, 1) }' "$S/jobs"
+    fi
+    ;;
+oardel)
+    rc=0
+    for j in "$@"; do
+        if down OARDEL || ! has_job "$j" || case " $FAKE_OARDEL_IDS " in *" $j "*) true ;; *) false ;; esac; then
+            echo "oardel: cannot delete job $j: you are not its owner or it does not exist" >&2; rc=1
+        else
+            drop_job "$j"
+        fi
+    done
+    exit $rc
+    ;;
+esac
