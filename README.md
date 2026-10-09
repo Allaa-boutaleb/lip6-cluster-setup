@@ -42,6 +42,22 @@ cd lip6-cluster-setup
 ```
 
 <details>
+<summary><b>No git?</b> Download the release instead</summary>
+<br>
+
+Download `lip6-cluster-setup.zip` from the [latest release](https://github.com/Allaa-boutaleb/lip6-cluster-setup/releases/latest) and unzip it. Open a terminal in the unzipped folder (the one that contains `lip6-cluster-setup`) and run `./lip6-cluster-setup`.
+
+Or do it all from the terminal:
+
+```bash
+curl -L https://github.com/Allaa-boutaleb/lip6-cluster-setup/releases/latest/download/lip6-cluster-setup.tar.gz | tar xz
+cd lip6-cluster-setup
+./lip6-cluster-setup
+```
+
+</details>
+
+<details>
 <summary><b>On Windows?</b> Use Git Bash or WSL</summary>
 <br>
 
@@ -455,6 +471,8 @@ cd lip6-cluster-setup
 git pull
 ./lip6-cluster-setup
 ```
+
+Downloaded a release instead? Get the newest one the same way and run its `./lip6-cluster-setup`.
 
 The installer asks its questions again and copies the new `conv-manager` and `hpc-notebook` over `~/conv-manager` and `~/hpc-notebook`, with your email put back in. Your key already works, so it does not ask for your password. Don't copy the files by hand: the repo versions have no email set, so job notifications would stop.
 
