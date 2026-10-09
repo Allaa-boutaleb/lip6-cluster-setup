@@ -21,7 +21,11 @@ CASE="dead entry forgotten"
 
 CASE="ssh sharing"
 rssh hpc true
-grep -q 'ControlMaster=auto' "$FAKE_LOG" || fail "rssh does not share connections"
+if [ "$PLATFORM" = gitbash ]; then
+    ! grep -q 'ControlMaster' "$FAKE_LOG" || fail "Git Bash's ssh cannot share connections, rssh must not ask"
+else
+    grep -q 'ControlMaster=auto' "$FAKE_LOG" || fail "rssh does not share connections"
+fi
 : > "$FAKE_LOG"; LIP6_NO_MUX=1; . "$T/conv.sh"; unset LIP6_NO_MUX
 rssh hpc true
 ! grep -q 'ControlMaster' "$FAKE_LOG" || fail "LIP6_NO_MUX=1 ignored"
